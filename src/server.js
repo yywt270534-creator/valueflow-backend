@@ -1,9 +1,22 @@
 const http = require('http');
 const { Server } = require('socket.io');
-const app = require('./src/app'); // ชี้ไปยัง src/app.js
-const pool = require('./src/config/db'); // ชี้ไปยัง src/config/db.js
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
+
+// 1. นำเข้า Express App จาก src/app.js
+const app = require('./src/app');
+
+// 2. นำเข้า Database Pool แบบ Safe Loading (ป้องกันการ Crash หากหาไฟล์ไม่พบ)
+let pool;
+try {
+  pool = require('./src/config/db');
+} catch (err) {
+  try {
+    pool = require('./config/db');
+  } catch (e) {
+    console.warn('⚠️ Warning: PostgreSQL pool could not be loaded:', e.message);
+  }
+}
 
 const server = http.createServer(app);
 
@@ -26,7 +39,7 @@ const verifyToken = (req, res, next) => {
   const token = authHeader.split(' ')[1];
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded; // เก็บข้อมูล Payload ไว้ใช้งานต่อ
+    req.user = decoded;
     next();
   } catch (err) {
     return res.status(403).json({ error: 'Token ไม่ถูกต้องหรือหมดอายุ' });
@@ -37,6 +50,10 @@ const verifyToken = (req, res, next) => {
 // API: อัปเดตสถานะดีล (พร้อมระบบป้องกันสิทธิ์ State Machine)
 // ==========================================
 app.put('/api/deals/:dealId/status', verifyToken, async (req, res) => {
+  if (!pool) {
+    return res.status(500).json({ error: 'Database pool is not initialized' });
+  }
+
   const { dealId } = req.params;
   const { nextStatus } = req.body;
   const userId = req.user.id;
@@ -48,7 +65,6 @@ app.put('/api/deals/:dealId/status', verifyToken, async (req, res) => {
   }
 
   try {
-    // 1. ตรวจสอบว่าดีลมีอยู่จริงหรือไม่
     const dealQuery = await pool.query(`SELECT * FROM deals WHERE id = $1`, [dealId]);
     if (dealQuery.rows.length === 0) {
       return res.status(404).json({ error: 'ไม่พบดีลนี้ในระบบ' });
@@ -59,7 +75,6 @@ app.put('/api/deals/:dealId/status', verifyToken, async (req, res) => {
     const isSeller = deal.seller_id === userId;
     const isAdmin = userRole === 'admin';
 
-    // 2. ตรวจสอบสิทธิ์การเปลี่ยนสถานะตาม Escrow Workflow
     let isAuthorized = false;
     if (deal.status === 'pending' && nextStatus === 'paid' && isBuyer) isAuthorized = true;
     if (deal.status === 'pending' && nextStatus === 'cancelled' && isBuyer) isAuthorized = true;
@@ -71,15 +86,12 @@ app.put('/api/deals/:dealId/status', verifyToken, async (req, res) => {
       return res.status(403).json({ error: 'คุณไม่มีสิทธิ์เปลี่ยนสถานะดีลนี้ในขั้นตอนนี้' });
     }
 
-    // 3. ดำเนินการอัปเดตลงฐานข้อมูล
     const updateResult = await pool.query(
       `UPDATE deals SET status = $1 WHERE id = $2 RETURNING *`,
       [nextStatus, dealId]
     );
 
     const updatedDeal = updateResult.rows[0];
-
-    // 4. ส่งข้อมูลอัปเดตผ่าน Socket.io ไปยังห้องของดีลนี้
     io.to(`deal_${dealId}`).emit('deal_status_updated', updatedDeal);
 
     res.json({
@@ -105,7 +117,7 @@ io.on('connection', (socket) => {
     }
 
     try {
-      if (userId) {
+      if (userId && pool) {
         const checkQuery = `SELECT id FROM deals WHERE id = $1 AND (buyer_id = $2 OR seller_id = $2)`;
         const checkResult = await pool.query(checkQuery, [dealId, userId]);
         
@@ -130,6 +142,7 @@ io.on('connection', (socket) => {
     }
 
     try {
+      if (!pool) throw new Error('Database pool not initialized');
       const authCheck = await pool.query(
         `SELECT id FROM deals WHERE id = $1 AND (buyer_id = $2 OR seller_id = $2)`,
         [deal_id, sender_id]

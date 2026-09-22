@@ -1,6 +1,7 @@
 const http = require('http');
 const { Server } = require('socket.io');
-const app = require('./app'); // ตรวจสอบให้แน่ใจว่าในโฟลเดอร์มีไฟล์ที่ส่งออก express app นี้จริง
+// แก้ไขบรรทัดที่ 3 ใน server.js
+const app = require('./src/app'); // ชี้ไปยัง src/app.js ให้ถูกต้อง
 const pool = require('./config/db');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();

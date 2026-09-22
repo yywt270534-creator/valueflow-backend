@@ -3,22 +3,13 @@ const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
-// 1. นำเข้า Express App
-const app = require('./src/app');
+// 1. นำเข้า Express App (ไฟล์ app.js อยู่ในโฟลเดอร์ src/ เดียวกัน)
+const app = require('./app');
 
-// 2. นำเข้า Database Pool แบบ Safe Loading
-let pool;
-try {
-  pool = require('./src/config/db');
-} catch (err) {
-  try {
-    pool = require('./config/db');
-  } catch (e) {
-    console.warn('⚠️ Warning: PostgreSQL pool could not be loaded:', e.message);
-  }
-}
+// 2. นำเข้า Database Pool (ไฟล์ db.js อยู่ใน src/config/)
+const pool = require('./config/db');
 
-// Global Process Error Handlers ป้องกัน Server ดับกะทันหันเมื่อเกิด Error
+// Global Process Error Handlers ป้องกัน Node Process ล่มกะทันหัน
 process.on('uncaughtException', (err) => {
   console.error('🔥 Uncaught Exception:', err.stack || err);
 });
@@ -29,7 +20,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 const server = http.createServer(app);
 
-// ตั้งค่า Socket.io พร้อมจำกัด CORS
+// ตั้งค่า Socket.io พร้อม CORS
 const io = new Server(server, {
   cors: {
     origin: process.env.CLIENT_URL || "*",
@@ -38,7 +29,7 @@ const io = new Server(server, {
   }
 });
 
-// Middleware ตรวจสอบ JWT
+// Middleware ตรวจสอบ JWT Token
 const verifyToken = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -55,12 +46,10 @@ const verifyToken = (req, res, next) => {
   }
 };
 
-// API: อัปเดตสถานะดีล
+// ==========================================
+// API: อัปเดตสถานะดีล (Escrow State Machine)
+// ==========================================
 app.put('/api/deals/:dealId/status', verifyToken, async (req, res) => {
-  if (!pool) {
-    return res.status(500).json({ error: 'Database pool is not initialized' });
-  }
-
   const { dealId } = req.params;
   const { nextStatus } = req.body;
   const userId = req.user.id;
@@ -112,7 +101,7 @@ app.put('/api/deals/:dealId/status', verifyToken, async (req, res) => {
   }
 });
 
-// Socket.io Events
+// Socket.io Real-time Events
 io.on('connection', (socket) => {
   console.log(`🔌 User connected: ${socket.id}`);
 
@@ -124,7 +113,7 @@ io.on('connection', (socket) => {
     }
 
     try {
-      if (userId && pool) {
+      if (userId) {
         const checkQuery = `SELECT id FROM deals WHERE id = $1 AND (buyer_id = $2 OR seller_id = $2)`;
         const checkResult = await pool.query(checkQuery, [dealId, userId]);
         
@@ -149,7 +138,6 @@ io.on('connection', (socket) => {
     }
 
     try {
-      if (!pool) throw new Error('Database pool not initialized');
       const authCheck = await pool.query(
         `SELECT id FROM deals WHERE id = $1 AND (buyer_id = $2 OR seller_id = $2)`,
         [deal_id, sender_id]
@@ -179,7 +167,7 @@ io.on('connection', (socket) => {
   });
 });
 
-// กำหนด Host เป็น 0.0.0.0 เพื่อให้ Railway Proxy สื่อสารกับ Node.js ภายใน Container ได้
+// บินด์ Port และ Host สำหรับ Container บน Railway
 const PORT = process.env.PORT || 5000;
 const HOST = '0.0.0.0';
 

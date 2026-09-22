@@ -1,25 +1,37 @@
 const jwt = require('jsonwebtoken');
 
-// ฟังก์ชัน Middleware สำหรับตรวจสอบ JWT Token
+/**
+ * Middleware ตรวจสอบความถูกต้องของ JWT Token ใน Request Header
+ */
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers.authorization;
 
-  // ตรวจสอบว่ามีการส่ง Authorization Header มาหรือไม่
+  // 1. ตรวจสอบว่ามี Header Authorization และขึ้นต้นด้วย "Bearer " หรือไม่
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Unauthorized: Missing or invalid token format' });
+    return res.status(401).json({ 
+      error: 'Unauthorized: Missing or invalid token format' 
+    });
   }
 
+  // 2. แยกข้อความเพื่อเอาเฉพาะ Token string
   const token = authHeader.split(' ')[1];
 
   try {
-    // ถอดรหัส Token และบันทึกข้อมูลผู้ใช้ลงใน req.user
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret');
+    // 3. ยืนยันความถูกต้องของ Token ด้วย JWT_SECRET จาก Environment Variable
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    
+    // 4. แนบข้อมูล Payload (id, email, role) เข้าไปใน req.user
     req.user = decoded;
-    next(); // อนุญาตให้ผ่านไปทำขั้นตอนถัดไป
+    
+    // 5. ส่งผ่านให้ Controller ถัดไปทำงาน
+    next();
   } catch (err) {
+    // แยกประเภท Error เพื่อให้ Client เข้าใจสาเหตุได้ชัดเจนขึ้น
+    if (err.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Unauthorized: Token has expired' });
+    }
     return res.status(401).json({ error: 'Unauthorized: Invalid token' });
   }
 };
 
-// ส่งออกเป็นฟังก์ชันโดยตรง (ไม่ห่อด้วย Object)
 module.exports = authMiddleware;

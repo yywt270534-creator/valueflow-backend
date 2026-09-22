@@ -21,28 +21,46 @@ app.post('/api/payment/webhook', express.raw({ type: 'application/json' }), paym
 // [จุดสำคัญที่ 2] เปิดใช้งาน express.json() สำหรับ API อื่นๆ ในระบบ
 app.use(express.json({ limit: '10kb' }));
 
+// ==========================================
+// Health Check Routes (แก้ปัญหา Cannot GET /)
+// ==========================================
+app.get('/', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'ValueFlow Backend API is running successfully!',
+    environment: process.env.NODE_ENV || 'development',
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/api', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'ValueFlow API Endpoint'
+  });
+});
+
 // Rate Limiters
 const generalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: process.env.NODE_ENV === 'test' ? 10000 : 100,
-    message: { error: "Too many requests from this IP, please try again later" }
+  windowMs: 15 * 60 * 1000,
+  max: process.env.NODE_ENV === 'test' ? 10000 : 100,
+  message: { error: "Too many requests from this IP, please try again later" }
 });
 
 const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: process.env.NODE_ENV === 'test' ? 10000 : 5,
-    message: { error: "Too many login attempts from this IP, please try again after 15 minutes" }
+  windowMs: 15 * 60 * 1000,
+  max: process.env.NODE_ENV === 'test' ? 10000 : 5,
+  message: { error: "Too many login attempts from this IP, please try again after 15 minutes" }
 });
 
 app.use('/api', generalLimiter);
 app.use('/api/auth/login', loginLimiter);
 
-// Register Routes อื่นๆ
+// Register Routes
 app.use('/api/auth', authRoutes);
-app.use('/api', apiRoutes);
+app.use('/api/notifications', notificationRoutes); // [แก้ไข] เพิ่มการลงทะเบียน Notification Routes
 app.use('/api/deals', chatRoutes);
-
-// [จุดสำคัญที่ 3] สำหรับ Payment API ทั่วไป (เช่น /create-payment-intent) ให้อยู่ภายใต้ /api/payment
 app.use('/api/payment', paymentRoutes);
+app.use('/api', apiRoutes);
 
 module.exports = app;

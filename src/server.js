@@ -1,8 +1,7 @@
 const http = require('http');
 const { Server } = require('socket.io');
-// แก้ไขบรรทัดที่ 3 ใน server.js
-const app = require('./src/app'); // ชี้ไปยัง src/app.js ให้ถูกต้อง
-const pool = require('./config/db');
+const app = require('./src/app'); // ชี้ไปยัง src/app.js
+const pool = require('./src/config/db'); // ชี้ไปยัง src/config/db.js
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
@@ -11,7 +10,7 @@ const server = http.createServer(app);
 // ตั้งค่า Socket.io พร้อมจำกัด CORS
 const io = new Server(server, {
   cors: {
-    origin: process.env.CLIENT_URL || "http://localhost:3000",
+    origin: process.env.CLIENT_URL || "*",
     methods: ["GET", "POST"],
     credentials: true
   }
@@ -162,5 +161,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-    console.log(`🚀 Server running safely on port ${PORT} with WebSocket support in ${process.env.NODE_ENV || 'development'} mode`);
+  console.log(`🚀 Server running safely on port ${PORT} with WebSocket support in ${process.env.NODE_ENV || 'development'} mode`);
 });

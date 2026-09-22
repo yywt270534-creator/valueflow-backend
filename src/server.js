@@ -3,10 +3,10 @@ const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
-// 1. นำเข้า Express App จาก src/app.js
+// 1. นำเข้า Express App
 const app = require('./src/app');
 
-// 2. นำเข้า Database Pool แบบ Safe Loading (ป้องกันการ Crash หากหาไฟล์ไม่พบ)
+// 2. นำเข้า Database Pool แบบ Safe Loading
 let pool;
 try {
   pool = require('./src/config/db');
@@ -17,6 +17,15 @@ try {
     console.warn('⚠️ Warning: PostgreSQL pool could not be loaded:', e.message);
   }
 }
+
+// Global Process Error Handlers ป้องกัน Server ดับกะทันหันเมื่อเกิด Error
+process.on('uncaughtException', (err) => {
+  console.error('🔥 Uncaught Exception:', err.stack || err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('🔥 Unhandled Rejection at:', promise, 'reason:', reason);
+});
 
 const server = http.createServer(app);
 
@@ -29,7 +38,7 @@ const io = new Server(server, {
   }
 });
 
-// Middleware สำหรับตรวจสอบ JWT และสิทธิ์การใช้งาน
+// Middleware ตรวจสอบ JWT
 const verifyToken = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -46,9 +55,7 @@ const verifyToken = (req, res, next) => {
   }
 };
 
-// ==========================================
-// API: อัปเดตสถานะดีล (พร้อมระบบป้องกันสิทธิ์ State Machine)
-// ==========================================
+// API: อัปเดตสถานะดีล
 app.put('/api/deals/:dealId/status', verifyToken, async (req, res) => {
   if (!pool) {
     return res.status(500).json({ error: 'Database pool is not initialized' });
@@ -105,7 +112,7 @@ app.put('/api/deals/:dealId/status', verifyToken, async (req, res) => {
   }
 });
 
-// Socket.io Event Handling
+// Socket.io Events
 io.on('connection', (socket) => {
   console.log(`🔌 User connected: ${socket.id}`);
 
@@ -172,7 +179,10 @@ io.on('connection', (socket) => {
   });
 });
 
+// กำหนด Host เป็น 0.0.0.0 เพื่อให้ Railway Proxy สื่อสารกับ Node.js ภายใน Container ได้
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`🚀 Server running safely on port ${PORT} with WebSocket support in ${process.env.NODE_ENV || 'development'} mode`);
+const HOST = '0.0.0.0';
+
+server.listen(PORT, HOST, () => {
+  console.log(`🚀 Server running on http://${HOST}:${PORT} with WebSocket support in ${process.env.NODE_ENV || 'development'} mode`);
 });

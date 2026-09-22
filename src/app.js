@@ -9,6 +9,7 @@ const apiRoutes = require('./routes/api');
 const chatRoutes = require('./routes/chat');
 const paymentRoutes = require('./routes/payment');
 const notificationRoutes = require('./routes/notifications');
+const transactionRoutes = require('./routes/transactionRoutes'); // [จุดที่เพิ่ม 1] นำเข้า Transaction Routes
 
 const app = express();
 
@@ -58,9 +59,10 @@ app.use('/api/auth/login', loginLimiter);
 
 // Register Routes
 app.use('/api/auth', authRoutes);
-app.use('/api/notifications', notificationRoutes); // [แก้ไข] เพิ่มการลงทะเบียน Notification Routes
+app.use('/api/notifications', notificationRoutes);
 app.use('/api/deals', chatRoutes);
 app.use('/api/payment', paymentRoutes);
+app.use('/api/transactions', transactionRoutes); // [จุดที่เพิ่ม 2] ลงทะเบียน Transaction Routes
 app.use('/api', apiRoutes);
 
 module.exports = app;

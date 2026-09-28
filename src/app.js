@@ -10,6 +10,7 @@ const chatRoutes = require('./routes/chat');
 const paymentRoutes = require('./routes/payment');
 const notificationRoutes = require('./routes/notifications');
 const transactionRoutes = require('./routes/transactionRoutes'); // [จุดที่เพิ่ม 1] นำเข้า Transaction Routes
+const dealRoutes = require('./routes/dealRoutes');
 
 const app = express();
 

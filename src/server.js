@@ -25,7 +25,7 @@ try {
   }
 }
 
-// 3. นำเข้า Socket.io และ JWT
+// 3. นำเข้า Socket.io
 let Server;
 try {
   Server = require('socket.io').Server;
@@ -33,14 +33,7 @@ try {
   console.warn('⚠️ socket.io package is missing. WebSockets disabled.');
 }
 
-let jwt;
-try {
-  jwt = require('jsonwebtoken');
-} catch (err) {
-  console.warn('⚠️ jsonwebtoken package is missing.');
-}
-
-// Global Uncaught Exception Handlers ป้องกัน Process ดับกะทันหัน
+// Global Uncaught Exception Handlers
 process.on('uncaughtException', (err) => {
   console.error('🔥 Uncaught Exception:', err.stack || err);
 });
@@ -49,109 +42,8 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('🔥 Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-// 4. ประกาศ Middleware ตรวจสอบ JWT ให้พร้อมใช้งาน
-const verifyToken = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'ไม่พบ Token การยืนยันตัวตน' });
-  }
-
-  const token = authHeader.split(' ')[1];
-  try {
-    if (!jwt) throw new Error('JWT module missing');
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
-    next();
-  } catch (err) {
-    return res.status(403).json({ error: 'Token ไม่ถูกต้องหรือหมดอายุ' });
-  }
-};
-
 // ==========================================================
-// 5. API ROUTES (จัดลำดับถูกต้อง: Static Route ต้องอยู่ก่อน Dynamic Route)
-// ==========================================================
-
-// 5.1 API Route: ดึงรายการดีลของฉัน (ต้องอยู่ด้านบนสุดของกลุ่ม deals เสมอ)
-app.get('/api/deals/my-deals', verifyToken, async (req, res) => {
-  if (!pool) return res.status(500).json({ error: 'Database pool unavailable' });
-
-  const userId = req.user.id;
-
-  try {
-    const query = `
-      SELECT * FROM deals 
-      WHERE buyer_id = $1 OR seller_id = $1 
-      ORDER BY created_at DESC
-    `;
-    const result = await pool.query(query, [userId]);
-
-    res.json({
-      success: true,
-      data: result.rows
-    });
-  } catch (err) {
-    console.error('Get My Deals Error:', err.message);
-    res.status(500).json({ error: 'เกิดข้อผิดพลาดภายในเซิร์ฟเวอร์' });
-  }
-});
-
-// 5.2 API Route: อัปเดตสถานะดีล (Dynamic Route อยู่ถัดลงมา)
-app.put('/api/deals/:dealId/status', verifyToken, async (req, res) => {
-  if (!pool) return res.status(500).json({ error: 'Database pool unavailable' });
-
-  const { dealId } = req.params;
-  const { nextStatus } = req.body;
-  const userId = req.user.id;
-  const userRole = req.user.role;
-
-  const validStatuses = ['pending', 'paid', 'delivered', 'inspected', 'completed', 'cancelled'];
-  if (!validStatuses.includes(nextStatus)) {
-    return res.status(400).json({ error: 'สถานะไม่ถูกต้องตามเงื่อนไขระบบ' });
-  }
-
-  try {
-    const dealQuery = await pool.query(`SELECT * FROM deals WHERE id = $1`, [dealId]);
-    if (dealQuery.rows.length === 0) {
-      return res.status(404).json({ error: 'ไม่พบดีลนี้ในระบบ' });
-    }
-    const deal = dealQuery.rows[0];
-
-    const isBuyer = deal.buyer_id === userId;
-    const isSeller = deal.seller_id === userId;
-    const isAdmin = userRole === 'admin';
-
-    let isAuthorized = false;
-    if (deal.status === 'pending' && nextStatus === 'paid' && isBuyer) isAuthorized = true;
-    if (deal.status === 'pending' && nextStatus === 'cancelled' && isBuyer) isAuthorized = true;
-    if (deal.status === 'paid' && nextStatus === 'delivered' && (isSeller || isAdmin)) isAuthorized = true;
-    if (deal.status === 'delivered' && nextStatus === 'inspected' && (isBuyer || isAdmin)) isAuthorized = true;
-    if (deal.status === 'inspected' && nextStatus === 'completed' && isAdmin) isAuthorized = true;
-
-    if (!isAuthorized) {
-      return res.status(403).json({ error: 'คุณไม่มีสิทธิ์เปลี่ยนสถานะดีลนี้ในขั้นตอนนี้' });
-    }
-
-    const updateResult = await pool.query(
-      `UPDATE deals SET status = $1 WHERE id = $2 RETURNING *`,
-      [nextStatus, dealId]
-    );
-
-    const updatedDeal = updateResult.rows[0];
-    if (io) io.to(`deal_${dealId}`).emit('deal_status_updated', updatedDeal);
-
-    res.json({
-      success: true,
-      message: 'อัปเดตสถานะดีลสำเร็จ',
-      data: updatedDeal
-    });
-  } catch (err) {
-    console.error('Update Deal Status Error:', err.message);
-    res.status(500).json({ error: 'เกิดข้อผิดพลาดภายในเซิร์ฟเวอร์' });
-  }
-});
-
-// ==========================================================
-// 6. SOCKET.IO & HTTP SERVER SETUP
+// 4. SOCKET.IO & HTTP SERVER SETUP
 // ==========================================================
 const server = http.createServer(app);
 
@@ -164,6 +56,9 @@ if (Server) {
       credentials: true
     }
   });
+
+  // แชร์ io instance ให้แอปใช้งาน (ถ้าต้องการเรียกใช้ผ่าน app.get)
+  app.set('io', io);
 
   io.on('connection', (socket) => {
     console.log(`🔌 User connected: ${socket.id}`);
@@ -209,7 +104,7 @@ if (Server) {
   });
 }
 
-// 7. เริ่มต้นเปิด Server
+// 5. เริ่มต้นเปิด Server
 const PORT = process.env.PORT || 5000;
 const HOST = '0.0.0.0';
 

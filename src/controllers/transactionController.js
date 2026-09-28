@@ -1,27 +1,27 @@
-const supabase = require('../config/supabase');
+const pool = require('../config/db');
 
 /**
  * ดึงรายการธุรกรรมทั้งหมดของผู้ใช้ที่ล็อกอินอยู่
  */
 exports.getTransactions = async (req, res) => {
   try {
-    const userId = req.user.id; // ดึง id จาก Payload ที่ authMiddleware แนบมา
+    const userId = req.user.id;
 
-    const { data, error } = await supabase
-      .from('transactions')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
+    const query = `
+      SELECT * FROM transactions 
+      WHERE user_id = $1 
+      ORDER BY created_at DESC
+    `;
+    const { rows } = await pool.query(query, [userId]);
 
     return res.status(200).json({
       success: true,
-      count: data.length,
-      data: data
+      count: rows.length,
+      data: rows
     });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('Error fetching transactions:', err);
+    return res.status(500).json({ error: 'เกิดข้อผิดพลาดในการดึงข้อมูลธุรกรรม' });
   }
 };
 
@@ -33,8 +33,7 @@ exports.createTransaction = async (req, res) => {
     const userId = req.user.id;
     const { type, amount, category, description } = req.body;
 
-    // ตรวจสอบความถูกต้องของข้อมูลเบื้องต้น
-    if (!type || !amount || !category) {
+    if (!type || amount === undefined || !category) {
       return res.status(400).json({ error: 'กรุณากรอกประเภท, จำนวนเงิน และหมวดหมู่ให้ครบถ้วน' });
     }
 
@@ -42,27 +41,22 @@ exports.createTransaction = async (req, res) => {
       return res.status(400).json({ error: 'ประเภทธุรกรรมต้องเป็น income หรือ expense เท่านั้น' });
     }
 
-    const { data, error } = await supabase
-      .from('transactions')
-      .insert([
-        {
-          user_id: userId,
-          type,
-          amount,
-          category,
-          description: description || ''
-        }
-      ])
-      .select();
+    const query = `
+      INSERT INTO transactions (user_id, type, amount, category, description, created_at)
+      VALUES ($1, $2, $3, $4, $5, NOW())
+      RETURNING *;
+    `;
+    const values = [userId, type, amount, category, description || ''];
 
-    if (error) throw error;
+    const { rows } = await pool.query(query, values);
 
     return res.status(201).json({
       success: true,
       message: 'บันทึกรายการสำเร็จ',
-      data: data[0]
+      data: rows[0]
     });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    console.error('Error creating transaction:', err);
+    return res.status(500).json({ error: 'เกิดข้อผิดพลาดในการสร้างรายการธุรกรรม' });
   }
 };

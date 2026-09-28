@@ -2,7 +2,7 @@ const http = require('http');
 const path = require('path');
 require('dotenv').config();
 
-// 1. นำเข้า Express App
+// 1. นำเข้า Express App ก่อนเป็นอันดับแรก
 let app;
 try {
   app = require('./app');
@@ -11,7 +11,7 @@ try {
   process.exit(1);
 }
 
-// 2. นำเข้า Database Pool แบบ Dynamic Fallback (ค้นหาทั้งใน src/config และ Root config)
+// 2. นำเข้า Database Pool แบบ Dynamic Fallback
 let pool = null;
 try {
   pool = require('./config/db');
@@ -25,7 +25,7 @@ try {
   }
 }
 
-// 3. นำเข้า Socket.io และ JWT แบบปลอดภัย
+// 3. นำเข้า Socket.io และ JWT
 let Server;
 try {
   Server = require('socket.io').Server;
@@ -49,64 +49,7 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('🔥 Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-const server = http.createServer(app);
-
-// ตั้งค่า Socket.io
-let io = null;
-if (Server) {
-  io = new Server(server, {
-    cors: {
-      origin: process.env.CLIENT_URL || "*",
-      methods: ["GET", "POST"],
-      credentials: true
-    }
-  });
-
-  io.on('connection', (socket) => {
-    console.log(`🔌 User connected: ${socket.id}`);
-
-    socket.on('join_deal', async (data) => {
-      const { dealId, userId } = typeof data === 'object' ? data : { dealId: data, userId: null };
-      if (!dealId) return socket.emit('error', { message: 'Missing dealId' });
-
-      try {
-        if (userId && pool) {
-          const checkQuery = `SELECT id FROM deals WHERE id = $1 AND (buyer_id = $2 OR seller_id = $2)`;
-          const checkResult = await pool.query(checkQuery, [dealId, userId]);
-          if (checkResult.rows.length === 0) {
-            return socket.emit('error', { message: 'Unauthorized to join this deal room' });
-          }
-        }
-        socket.join(`deal_${dealId}`);
-      } catch (err) {
-        console.error('Join deal error:', err.message);
-      }
-    });
-
-    socket.on('send_message', async (data) => {
-      const { deal_id, sender_id, message } = data;
-      if (!deal_id || !sender_id || !message || message.trim() === '') return;
-
-      try {
-        if (!pool) return;
-        const query = `
-          INSERT INTO deal_chats (deal_id, sender_id, message, created_at)
-          VALUES ($1, $2, $3, NOW()) RETURNING *;
-        `;
-        const result = await pool.query(query, [deal_id, sender_id, message.trim()]);
-        io.to(`deal_${deal_id}`).emit('receive_message', result.rows[0]);
-      } catch (err) {
-        console.error('Socket chat error:', err.message);
-      }
-    });
-
-    socket.on('disconnect', () => {
-      console.log(`❌ User disconnected: ${socket.id}`);
-    });
-  });
-}
-
-// Middleware ตรวจสอบ JWT
+// 4. ประกาศ Middleware ตรวจสอบ JWT ให้พร้อมใช้งาน
 const verifyToken = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -124,7 +67,35 @@ const verifyToken = (req, res, next) => {
   }
 };
 
-// API Route: อัปเดตสถานะดีล
+// ==========================================================
+// 5. API ROUTES (จัดลำดับถูกต้อง: Static Route ต้องอยู่ก่อน Dynamic Route)
+// ==========================================================
+
+// 5.1 API Route: ดึงรายการดีลของฉัน (ต้องอยู่ด้านบนสุดของกลุ่ม deals เสมอ)
+app.get('/api/deals/my-deals', verifyToken, async (req, res) => {
+  if (!pool) return res.status(500).json({ error: 'Database pool unavailable' });
+
+  const userId = req.user.id;
+
+  try {
+    const query = `
+      SELECT * FROM deals 
+      WHERE buyer_id = $1 OR seller_id = $1 
+      ORDER BY created_at DESC
+    `;
+    const result = await pool.query(query, [userId]);
+
+    res.json({
+      success: true,
+      data: result.rows
+    });
+  } catch (err) {
+    console.error('Get My Deals Error:', err.message);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดภายในเซิร์ฟเวอร์' });
+  }
+});
+
+// 5.2 API Route: อัปเดตสถานะดีล (Dynamic Route อยู่ถัดลงมา)
 app.put('/api/deals/:dealId/status', verifyToken, async (req, res) => {
   if (!pool) return res.status(500).json({ error: 'Database pool unavailable' });
 
@@ -179,7 +150,66 @@ app.put('/api/deals/:dealId/status', verifyToken, async (req, res) => {
   }
 });
 
-// เริ่มต้นเปิด Server บน Host 0.0.0.0
+// ==========================================================
+// 6. SOCKET.IO & HTTP SERVER SETUP
+// ==========================================================
+const server = http.createServer(app);
+
+let io = null;
+if (Server) {
+  io = new Server(server, {
+    cors: {
+      origin: process.env.CLIENT_URL || "*",
+      methods: ["GET", "POST"],
+      credentials: true
+    }
+  });
+
+  io.on('connection', (socket) => {
+    console.log(`🔌 User connected: ${socket.id}`);
+
+    socket.on('join_deal', async (data) => {
+      const { dealId, userId } = typeof data === 'object' ? data : { dealId: data, userId: null };
+      if (!dealId) return socket.emit('error', { message: 'Missing dealId' });
+
+      try {
+        if (userId && pool) {
+          const checkQuery = `SELECT id FROM deals WHERE id = $1 AND (buyer_id = $2 OR seller_id = $2)`;
+          const checkResult = await pool.query(checkQuery, [dealId, userId]);
+          if (checkResult.rows.length === 0) {
+            return socket.emit('error', { message: 'Unauthorized to join this deal room' });
+          }
+        }
+        socket.join(`deal_${dealId}`);
+      } catch (err) {
+        console.error('Join deal error:', err.message);
+      }
+    });
+
+    socket.on('send_message', async (data) => {
+      const { deal_id, sender_id, message } = data;
+      if (!deal_id || !sender_id || !message || message.trim() === '') return;
+
+      try {
+        if (!pool) return;
+        const query = `
+          INSERT INTO deal_chats (deal_id, sender_id, message, created_at)
+          VALUES ($1, $2, $3, NOW()) RETURNING *;
+        `;
+        const result = await pool.query(query, [deal_id, sender_id, message.trim()]);
+        io.to(`deal_${deal_id}`).emit('receive_message', result.rows[0]);
+      } catch (err) {
+        console.error('Socket chat error:', err.message);
+      }
+    });
+
+    socket.on('disconnect', () => {
+      console.log(`❌ User disconnected: ${socket.id}`);
+    });
+  });
+}
+
+// 7. เริ่มต้นเปิด Server
 const PORT = process.env.PORT || 5000;
 const HOST = '0.0.0.0';
 

@@ -1,191 +1,491 @@
-const db = require('../config/db');
+const pool = require('../config/db');
+const generateDealId = require('../utils/generateDealId');
 
-// ==========================================
-// 1. ฟังก์ชันสร้างดีลใหม่ (Create Deal)
-// ==========================================
-const createDeal = async (req, res) => {
+/**
+ * POST /api/deals
+ * Seller สร้างดีลใหม่
+ * Body: { productName, price, description?, shippingMethod? }
+ */
+exports.createDeal = async (req, res) => {
+  const { productName, price, description, shippingMethod } = req.body;
+  const sellerId = req.user.id;
+
+  // 1. Validate input
+  if (!productName || !price) {
+    return res.status(400).json({ error: 'กรุณากรอกชื่อสินค้าและราคา' });
+  }
+  const priceNum = Number(price);
+  if (isNaN(priceNum) || priceNum <= 0) {
+    return res.status(400).json({ error: 'ราคาต้องเป็นตัวเลขมากกว่า 0' });
+  }
+
   try {
-    const title = req.body.title || req.body.description || req.body.name;
-    const rawAmount = req.body.amount || req.body.price;
-    const amount = parseFloat(rawAmount);
-
-    if (!title || isNaN(amount) || amount <= 0) {
-      return res.status(400).json({ 
-        error: 'Invalid payload or amount',
-        details: 'กรุณาระบุชื่อดีลและจำนวนเงินที่ถูกต้อง (จำนวนเงินต้องมากกว่า 0)' 
-      });
+    // 2. Generate unique deal_id (retry ถ้าชน)
+    let dealId;
+    let attempts = 0;
+    while (attempts < 5) {
+      dealId = generateDealId();
+      const exists = await pool.query(
+        'SELECT 1 FROM deals WHERE deal_id = $1',
+        [dealId]
+      );
+      if (exists.rows.length === 0) break;
+      attempts++;
+    }
+    if (attempts >= 5) {
+      return res.status(500).json({ error: 'ไม่สามารถสร้างรหัสดีลได้ กรุณาลองใหม่' });
     }
 
-    const userId = req.user.id;
-    const buyerId = req.body.buyer_id || userId;
-    const sellerId = req.body.seller_id;
+    // 3. Insert ลง Database
+    const shipping = shippingMethod 
+      ? { method: shippingMethod, provider: null, trackingNumber: null }
+      : {};
 
-    // บังคับว่าต้องมี seller_id ที่ชัดเจน ห้ามเป็นค่าว่างเพื่อป้องกันการสวมสิทธิ์
-    if (!sellerId) {
-      return res.status(400).json({ error: 'Missing seller_id: ทุกดีลต้องระบุผู้ขายให้ชัดเจน' });
-    }
-
-    if (buyerId === sellerId) {
-      return res.status(400).json({ error: 'Buyer and Seller cannot be the same user' });
-    }
-
-    const newDeal = await db.query(
-      `INSERT INTO deals (title, amount, buyer_id, seller_id, status) 
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [title, amount, buyerId, sellerId, 'pending']
+    const result = await pool.query(
+      `INSERT INTO deals 
+        (deal_id, seller_id, product_name, price, fee, status, shipping, escrow_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [
+        dealId,
+        sellerId,
+        productName,
+        priceNum,
+        0,                      // fee ยังเป็น 0 ตาม Spec OPEN
+        'STEP_1_NEGOTIATION',
+        JSON.stringify(shipping),
+        'PENDING'
+      ]
     );
 
     res.status(201).json({
+      success: true,
       message: 'สร้างดีลสำเร็จ',
-      deal: newDeal.rows[0]
+      deal: result.rows[0],
     });
-
-  } catch (error) {
-    console.error('Create Deal Error:', error);
-    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการสร้างดีลที่เซิร์ฟเวอร์' });
+  } catch (err) {
+    console.error('Create Deal Error:', err);
+    res.status(500).json({
+      error: 'เกิดข้อผิดพลาดในการสร้างดีล',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
   }
 };
 
-// ==========================================
-// 2. ดูรายการดีลของฉัน (Get My Deals)
-// ==========================================
-const getMyDeals = async (req, res) => {
-  const userId = req.user.id;
+/**
+ * GET /api/deals/:dealId
+ * ดึงข้อมูลดีลตามรหัส (Buyer ใช้ตอน Join, Seller ใช้ตอนเปิดดู)
+ */
+exports.getDealById = async (req, res) => {
+  const { dealId } = req.params;
   try {
-    const deals = await db.query(
-      'SELECT * FROM deals WHERE buyer_id = $1 OR seller_id = $1 ORDER BY created_at DESC',
-      [userId]
+    const result = await pool.query(
+      `SELECT d.*, 
+              s.name AS seller_name,
+              b.name AS buyer_name
+       FROM deals d
+       LEFT JOIN users s ON s.id = d.seller_id
+       LEFT JOIN users b ON b.id = d.buyer_id
+       WHERE d.deal_id = $1`,
+      [dealId]
     );
-    res.json(deals.rows);
-  } catch (err) {
-    console.error('getMyDeals Error:', err.message);
-    res.status(500).json({ error: 'Failed to fetch deals' });
-  }
-};
-
-// ==========================================
-// 3. ดูรายละเอียดดีลเฉพาะเจาะจง (Get Deal by ID)
-// ==========================================
-const getDealById = async (req, res) => {
-  const dealId = req.params.id || req.params.dealId;
-  const userId = req.user.id;
-  
-  try {
-    const deal = await db.query('SELECT * FROM deals WHERE id = $1', [dealId]);
-    if (deal.rows.length === 0) return res.status(404).json({ error: 'Deal not found' });
-
-    const currentDeal = deal.rows[0];
-    if (currentDeal.buyer_id !== userId && currentDeal.seller_id !== userId && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Unauthorized to view this deal' });
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'ไม่พบดีลนี้' });
     }
-
-    res.json(currentDeal);
+    res.json({ success: true, deal: result.rows[0] });
   } catch (err) {
-    console.error('getDealById Error:', err.message);
-    res.status(500).json({ error: 'Failed to fetch deal' });
+    console.error('Get Deal Error:', err);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการดึงข้อมูลดีล' });
   }
 };
 
-// ==========================================
-// 4. Strict State Machine & Strict Role Check
-// ==========================================
-const updateDealStatus = async (req, res) => {
-  const dealId = req.params.id || req.params.dealId;
-  const { nextStatus } = req.body;
-  const userId = req.user.id;
-  const userSystemRole = req.user.role;
-
-  const client = await db.pool.connect(); 
+/**
+ * POST /api/deals/:dealId/join
+ * Buyer เข้าร่วมดีลด้วยรหัส
+ * Body: ไม่ต้องใช้ (dealId มาจาก URL)
+ */
+exports.joinDeal = async (req, res) => {
+  const { dealId } = req.params;
+  const buyerId = req.user.id;
 
   try {
-    await client.query('BEGIN');
-
-    // Lock Row ป้องกัน Race Condition
-    const dealResult = await client.query('SELECT * FROM deals WHERE id = $1 FOR UPDATE', [dealId]);
+    // 1. ดึงดีลตามรหัส
+    const dealResult = await pool.query(
+      'SELECT * FROM deals WHERE deal_id = $1',
+      [dealId]
+    );
     if (dealResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Deal not found' });
+      return res.status(404).json({ error: 'ไม่พบดีลนี้ หรือรหัสไม่ถูกต้อง' });
     }
-    
     const deal = dealResult.rows[0];
-    const currentStatus = deal.status;
 
-    const isBuyer = deal.buyer_id === userId;
-    const isSeller = deal.seller_id === userId;
-    const isAdmin = userSystemRole === 'admin';
-
-    if (!isBuyer && !isSeller && !isAdmin) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({ error: 'Unauthorized: Not part of this deal' });
+    // 2. ห้าม Seller เข้าร่วมดีลของตัวเอง
+    if (deal.seller_id === buyerId) {
+      return res.status(400).json({
+        error: 'คุณเป็นผู้ขายของดีลนี้ ไม่สามารถเข้าร่วมเป็นผู้ซื้อได้'
+      });
     }
 
-    const actorRole = isAdmin ? 'admin' : (isSeller ? 'seller' : 'buyer');
-
-    // กำหนดเส้นทางและสิทธิ์ที่ถูกต้องตามหลักการ Escrow 100%
-    const allowedTransitions = {
-      'pending': { 
-        next: ['paid', 'cancelled'], 
-        allowedRoles: { 'paid': ['buyer', 'admin'], 'cancelled': ['buyer', 'seller', 'admin'] } 
-      },
-      'paid': { 
-        next: ['delivered', 'disputed'], 
-        allowedRoles: { 'delivered': ['seller', 'admin'], 'disputed': ['buyer', 'seller', 'admin'] } 
-      },
-      'delivered': { 
-        next: ['inspected', 'disputed'], 
-        allowedRoles: { 'inspected': ['buyer', 'admin'], 'disputed': ['buyer', 'seller', 'admin'] } 
-      },
-      'inspected': { 
-        next: ['completed', 'disputed'], 
-        allowedRoles: { 'completed': ['admin'], 'disputed': ['buyer', 'seller', 'admin'] } 
-      },
-      'disputed': { 
-        next: ['completed', 'refunded'], 
-        allowedRoles: { 'completed': ['admin'], 'refunded': ['admin'] } 
+    // 3. ถ้ามี Buyer แล้ว
+    if (deal.buyer_id) {
+      if (deal.buyer_id === buyerId) {
+        return res.status(200).json({
+          success: true,
+          message: 'คุณเป็นผู้ซื้อของดีลนี้อยู่แล้ว',
+          deal,
+        });
       }
+      return res.status(409).json({ error: 'ดีลนี้มีผู้ซื้อแล้ว' });
+    }
+
+    // 4. ตรวจ Status — เข้าร่วมได้เฉพาะ STEP_1_NEGOTIATION
+    if (deal.status !== 'STEP_1_NEGOTIATION') {
+      return res.status(400).json({
+        error: `ดีลนี้ไม่อยู่ในสถานะที่เข้าร่วมได้ (สถานะปัจจุบัน: ${deal.status})`
+      });
+    }
+
+    // 5. Atomic Update: WHERE buyer_id IS NULL กัน Race Condition
+    const updated = await pool.query(
+      `UPDATE deals
+       SET buyer_id = $1,
+           status = 'STEP_2_PAYMENT',
+           updated_at = NOW()
+       WHERE deal_id = $2 AND buyer_id IS NULL
+       RETURNING *`,
+      [buyerId, dealId]
+    );
+
+    // ถ้า rows.length = 0 แสดงว่ามีคนอื่น update ไปก่อนเสี้ยววินาที
+    if (updated.rows.length === 0) {
+      return res.status(409).json({
+        error: 'มีผู้ซื้อรายอื่นเข้าร่วมดีลนี้ก่อนแล้ว กรุณาลองดีลอื่น'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'เข้าร่วมดีลสำเร็จ กรุณาดำเนินการชำระเงิน',
+      deal: updated.rows[0],
+    });
+  } catch (err) {
+    console.error('Join Deal Error:', err);
+    res.status(500).json({
+      error: 'เกิดข้อผิดพลาดในการเข้าร่วมดีล',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * POST /api/deals/:dealId/confirm-payment
+ * Buyer ยืนยันว่าชำระเงินแล้ว → ระบบพักเงิน
+ * Body: { paymentMethod? } (เก็บไว้ก่อน รอ Payment Gateway จริง)
+ */
+exports.confirmPayment = async (req, res) => {
+  const { dealId } = req.params;
+  const userId = req.user.id;
+
+  try {
+    const dealResult = await pool.query(
+      'SELECT * FROM deals WHERE deal_id = $1',
+      [dealId]
+    );
+    if (dealResult.rows.length === 0) {
+      return res.status(404).json({ error: 'ไม่พบดีลนี้' });
+    }
+    const deal = dealResult.rows[0];
+
+    // Permission: ต้องเป็น Buyer เท่านั้น
+    if (deal.buyer_id !== userId) {
+      return res.status(403).json({
+        error: 'เฉพาะผู้ซื้อเท่านั้นที่ยืนยันการชำระเงินได้'
+      });
+    }
+
+    // Idempotent: ถ้าจ่ายแล้ว → return 200 (ไม่ Error)
+    if (deal.escrow_status === 'HELD') {
+      return res.status(200).json({
+        success: true,
+        message: 'ยืนยันการชำระเงินแล้ว',
+        deal,
+      });
+    }
+
+    // ต้องอยู่ STEP_2_PAYMENT เท่านั้น
+    if (deal.status !== 'STEP_2_PAYMENT') {
+      return res.status(400).json({
+        error: `ไม่สามารถยืนยันการชำระเงินได้ สถานะปัจจุบัน: ${deal.status}`
+      });
+    }
+
+    // Atomic Update: กัน race condition
+    const updated = await pool.query(
+      `UPDATE deals
+       SET status = 'STEP_3_SHIPPING',
+           escrow_status = 'HELD',
+           updated_at = NOW()
+       WHERE deal_id = $1
+         AND status = 'STEP_2_PAYMENT'
+         AND escrow_status = 'PENDING'
+         AND buyer_id = $2
+       RETURNING *`,
+      [dealId, userId]
+    );
+
+    if (updated.rows.length === 0) {
+      return res.status(409).json({
+        error: 'ไม่สามารถยืนยันได้ อาจมีการเปลี่ยนสถานะไปแล้ว กรุณารีเฟรช'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'ยืนยันการชำระเงินสำเร็จ กรุณารอผู้ขายจัดส่งสินค้า',
+      deal: updated.rows[0],
+    });
+  } catch (err) {
+    console.error('Confirm Payment Error:', err);
+    res.status(500).json({
+      error: 'เกิดข้อผิดพลาด',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * POST /api/deals/:dealId/ship
+ * Seller ยืนยันจัดส่ง + กรอก Tracking
+ * Body: { trackingNumber, provider? }
+ */
+exports.shipDeal = async (req, res) => {
+  const { dealId } = req.params;
+  const { trackingNumber, provider } = req.body;
+  const userId = req.user.id;
+
+  // Validate: ถ้าเป็นวิธีจัดส่ง ต้องมี trackingNumber
+  try {
+    const dealResult = await pool.query(
+      'SELECT * FROM deals WHERE deal_id = $1',
+      [dealId]
+    );
+    if (dealResult.rows.length === 0) {
+      return res.status(404).json({ error: 'ไม่พบดีลนี้' });
+    }
+    const deal = dealResult.rows[0];
+
+    // Permission: ต้องเป็น Seller
+    if (deal.seller_id !== userId) {
+      return res.status(403).json({
+        error: 'เฉพาะผู้ขายเท่านั้นที่ยืนยันการจัดส่งได้'
+      });
+    }
+
+    // ต้องอยู่ STEP_3_SHIPPING เท่านั้น
+    if (deal.status !== 'STEP_3_SHIPPING') {
+      return res.status(400).json({
+        error: `ไม่สามารถยืนยันการจัดส่งได้ สถานะปัจจุบัน: ${deal.status}`
+      });
+    }
+
+    // ถ้าเป็นวิธีจัดส่ง ต้องมี trackingNumber
+    const method = deal.shipping?.method;
+    if (method && method !== 'pickup' && !trackingNumber) {
+      return res.status(400).json({
+        error: 'กรุณากรอกเลขพัสดุ (Tracking Number)'
+      });
+    }
+
+    // Merge shipping data — เก็บ method เดิมไว้
+    const updatedShipping = {
+      ...(deal.shipping || {}),
+      provider: provider || deal.shipping?.provider || null,
+      trackingNumber: trackingNumber || deal.shipping?.trackingNumber || null,
+      shippedAt: new Date().toISOString(),
     };
 
-    const currentRules = allowedTransitions[currentStatus];
-
-    if (!currentRules || !currentRules.next.includes(nextStatus)) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: `Invalid transition from ${currentStatus} to ${nextStatus}` });
-    }
-
-    // ตรวจสอบสิทธิ์ขาดจาก Role จริง ห้ามสลับฝั่งกดเด็ดขาด
-    const permittedRolesForThisStep = currentRules.allowedRoles[nextStatus] || [];
-    const hasPermission = isAdmin || permittedRolesForThisStep.includes(actorRole);
-
-    if (!hasPermission) {
-      await client.query('ROLLBACK');
-      return res.status(403).json({ error: `Role '${actorRole}' is not allowed to transition from ${currentStatus} to ${nextStatus}` });
-    }
-
-    const updatedDeal = await client.query(
-      'UPDATE deals SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
-      [nextStatus, dealId]
+    // Atomic Update
+    const updated = await pool.query(
+      `UPDATE deals
+       SET status = 'STEP_4_INSPECTION',
+           shipping = $1::jsonb,
+           updated_at = NOW()
+       WHERE deal_id = $2
+         AND status = 'STEP_3_SHIPPING'
+         AND seller_id = $3
+       RETURNING *`,
+      [JSON.stringify(updatedShipping), dealId, userId]
     );
 
-    await client.query(
-      `INSERT INTO deal_logs (deal_id, actor_role, previous_status, new_status) VALUES ($1, $2, $3, $4)`,
-      [dealId, actorRole, currentStatus, nextStatus]
-    );
+    if (updated.rows.length === 0) {
+      return res.status(409).json({
+        error: 'ไม่สามารถยืนยันได้ อาจมีการเปลี่ยนสถานะไปแล้ว'
+      });
+    }
 
-    await client.query('COMMIT');
-    res.json({ message: 'Status updated successfully', deal: updatedDeal.rows[0] });
-
+    res.status(200).json({
+      success: true,
+      message: 'ยืนยันการจัดส่งสำเร็จ กรุณารอผู้ซื้อตรวจรับ',
+      deal: updated.rows[0],
+    });
   } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('updateDealStatus Error:', err.message);
-    res.status(500).json({ error: 'Failed to update deal status' });
-  } finally {
-    client.release();
+    console.error('Ship Deal Error:', err);
+    res.status(500).json({
+      error: 'เกิดข้อผิดพลาด',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
   }
 };
 
-module.exports = { 
-  createDeal, 
-  getMyDeals, 
-  getDealById, 
-  updateDealStatus 
+/**
+ * POST /api/deals/:dealId/confirm-receipt
+ * Buyer ยืนยันรับสินค้า → เปลี่ยนสถานะเป็น RELEASE_PENDING
+ * (แยกจากการปล่อยเงินจริง ตาม Spec ข้อ 12-13)
+ */
+exports.confirmReceipt = async (req, res) => {
+  const { dealId } = req.params;
+  const userId = req.user.id;
+
+  try {
+    const dealResult = await pool.query(
+      'SELECT * FROM deals WHERE deal_id = $1',
+      [dealId]
+    );
+    if (dealResult.rows.length === 0) {
+      return res.status(404).json({ error: 'ไม่พบดีลนี้' });
+    }
+    const deal = dealResult.rows[0];
+
+    // Permission: ต้องเป็น Buyer
+    if (deal.buyer_id !== userId) {
+      return res.status(403).json({
+        error: 'เฉพาะผู้ซื้อเท่านั้นที่ยืนยันรับสินค้าได้'
+      });
+    }
+
+    // Idempotent: ถ้าอยู่ RELEASE_PENDING แล้ว → return 200
+    if (deal.status === 'RELEASE_PENDING') {
+      return res.status(200).json({
+        success: true,
+        message: 'ยืนยันรับสินค้าแล้ว กำลังรอระบบปล่อยเงิน',
+        deal,
+      });
+    }
+
+    // ต้องอยู่ STEP_4_INSPECTION เท่านั้น
+    if (deal.status !== 'STEP_4_INSPECTION') {
+      return res.status(400).json({
+        error: `ไม่สามารถยืนยันรับสินค้าได้ สถานะปัจจุบัน: ${deal.status}`
+      });
+    }
+
+    // Atomic Update
+    const updated = await pool.query(
+      `UPDATE deals
+       SET status = 'RELEASE_PENDING',
+           escrow_status = 'RELEASE_PENDING',
+           updated_at = NOW()
+       WHERE deal_id = $1
+         AND status = 'STEP_4_INSPECTION'
+         AND escrow_status = 'HELD'
+         AND buyer_id = $2
+       RETURNING *`,
+      [dealId, userId]
+    );
+
+    if (updated.rows.length === 0) {
+      return res.status(409).json({
+        error: 'ไม่สามารถยืนยันได้ อาจมีการเปลี่ยนสถานะไปแล้ว'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'ยืนยันรับสินค้าสำเร็จ ระบบจะดำเนินการปล่อยเงินให้ผู้ขาย',
+      deal: updated.rows[0],
+    });
+  } catch (err) {
+    console.error('Confirm Receipt Error:', err);
+    res.status(500).json({
+      error: 'เกิดข้อผิดพลาด',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * POST /api/deals/:dealId/release
+ * ปล่อยเงินให้ผู้ขาย (MVP: ให้คู่สัญญาฝ่ายใดฝ่ายหนึ่ง trigger ได้)
+ * Production: จะถูกเรียกโดย System/Webhook หลังตรวจ Dispute
+ */
+exports.releasePayment = async (req, res) => {
+  const { dealId } = req.params;
+  const userId = req.user.id;
+
+  try {
+    const dealResult = await pool.query(
+      'SELECT * FROM deals WHERE deal_id = $1',
+      [dealId]
+    );
+    if (dealResult.rows.length === 0) {
+      return res.status(404).json({ error: 'ไม่พบดีลนี้' });
+    }
+    const deal = dealResult.rows[0];
+
+    // Permission: ต้องเป็น Buyer หรือ Seller ของดีลนี้
+    const isParty = deal.buyer_id === userId || deal.seller_id === userId;
+    if (!isParty) {
+      return res.status(403).json({
+        error: 'คุณไม่มีสิทธิ์ปล่อยเงินในดีลนี้'
+      });
+    }
+
+    // Idempotent: ถ้าปล่อยแล้ว → return 200
+    if (deal.escrow_status === 'RELEASED') {
+      return res.status(200).json({
+        success: true,
+        message: 'ดีลนี้ปิดสำเร็จแล้ว',
+        deal,
+      });
+    }
+
+    // ต้องอยู่ RELEASE_PENDING เท่านั้น
+    if (deal.status !== 'RELEASE_PENDING' || deal.escrow_status !== 'RELEASE_PENDING') {
+      return res.status(400).json({
+        error: `ไม่สามารถปล่อยเงินได้ สถานะปัจจุบัน: ${deal.status} / ${deal.escrow_status}`
+      });
+    }
+
+    // Atomic Update
+    const updated = await pool.query(
+      `UPDATE deals
+       SET status = 'STEP_5_COMPLETED',
+           escrow_status = 'RELEASED',
+           released_at = NOW(),
+           updated_at = NOW()
+       WHERE deal_id = $1
+         AND status = 'RELEASE_PENDING'
+         AND escrow_status = 'RELEASE_PENDING'
+       RETURNING *`,
+      [dealId]
+    );
+
+    if (updated.rows.length === 0) {
+      return res.status(409).json({
+        error: 'ไม่สามารถปล่อยเงินได้ อาจมีการเปลี่ยนสถานะไปแล้ว'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'ปล่อยเงินสำเร็จ ดีลเสร็จสมบูรณ์',
+      deal: updated.rows[0],
+    });
+  } catch (err) {
+    console.error('Release Payment Error:', err);
+    res.status(500).json({
+      error: 'เกิดข้อผิดพลาด',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
 };

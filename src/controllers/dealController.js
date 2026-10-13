@@ -7,7 +7,10 @@ const generateDealId = require('../utils/generateDealId');
  * Body: { productName, price, description?, shippingMethod? }
  */
 exports.createDeal = async (req, res) => {
-  const { productName, price, description, shippingMethod } = req.body;
+  const {
+  productName, price, description, shippingMethod,
+  category, duration, escrowFeeSplit, senderAddress, escrowFeeAmount
+} = req.body;
   const sellerId = req.user.id;
 
   // 1. Validate input
@@ -15,6 +18,7 @@ exports.createDeal = async (req, res) => {
     return res.status(400).json({ error: 'กรุณากรอกชื่อสินค้าและราคา' });
   }
   const priceNum = Number(price);
+const feeAmount = Number(escrowFeeAmount) || 0;
   if (isNaN(priceNum) || priceNum <= 0) {
     return res.status(400).json({ error: 'ราคาต้องเป็นตัวเลขมากกว่า 0' });
   }
@@ -41,22 +45,30 @@ exports.createDeal = async (req, res) => {
       ? { method: shippingMethod, provider: null, trackingNumber: null }
       : {};
 
-    const result = await pool.query(
-      `INSERT INTO deals 
-        (deal_id, seller_id, product_name, price, fee, status, shipping, escrow_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING *`,
-      [
-        dealId,
-        sellerId,
-        productName,
-        priceNum,
-        0,                      // fee ยังเป็น 0 ตาม Spec OPEN
-        'STEP_1_NEGOTIATION',
-        JSON.stringify(shipping),
-        'PENDING'
-      ]
-    );
+const result = await pool.query(
+  `INSERT INTO deals 
+    (deal_id, seller_id, product_name, price, fee, status, 
+     shipping, escrow_status, description, category, duration, 
+     escrow_fee_split, sender_address, escrow_fee_amount)
+   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+   RETURNING *`,
+  [
+    dealId,
+    sellerId,
+    productName,
+    priceNum,
+    feeAmount,
+    'STEP_1_NEGOTIATION',
+    JSON.stringify(shipping),
+    'PENDING',
+    description || null,
+    category || null,
+    duration || null,
+    escrowFeeSplit || 'half',
+    senderAddress || null,
+    feeAmount
+  ]
+);
 
     res.status(201).json({
       success: true,
@@ -80,15 +92,17 @@ exports.getDealById = async (req, res) => {
   const { dealId } = req.params;
   try {
     const result = await pool.query(
-      `SELECT d.*, 
-              s.name AS seller_name,
-              b.name AS buyer_name
-       FROM deals d
-       LEFT JOIN users s ON s.id = d.seller_id
-       LEFT JOIN users b ON b.id = d.buyer_id
-       WHERE d.deal_id = $1`,
-      [dealId]
-    );
+  `SELECT d.*, 
+          s.name AS seller_name,
+          s.email AS seller_email,
+          b.name AS buyer_name,
+          b.email AS buyer_email
+   FROM deals d
+   LEFT JOIN users s ON s.id = d.seller_id
+   LEFT JOIN users b ON b.id = d.buyer_id
+   WHERE d.deal_id = $1`,
+  [dealId]
+);
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'ไม่พบดีลนี้' });
     }

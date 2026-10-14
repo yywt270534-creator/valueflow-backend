@@ -7,13 +7,15 @@ const {
   confirmPayment,
   shipDeal,
   confirmReceipt,
-  releasePayment       // 👈 เพิ่ม
+  releasePayment,
+  getMyDeals
 } = require('../controllers/dealController');
 const authMiddleware = require('../middleware/authMiddleware');
 
 router.use(authMiddleware);
 
 router.post('/', createDeal);
+router.get('/', getMyDeals);
 router.get('/:dealId', getDealById);
 router.post('/:dealId/join', joinDeal);
 router.post('/:dealId/confirm-payment', confirmPayment);

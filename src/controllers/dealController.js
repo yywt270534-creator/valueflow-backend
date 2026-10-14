@@ -85,6 +85,58 @@ const result = await pool.query(
 };
 
 /**
+ * GET /api/deals?role=seller|buyer|all
+ * ดึงรายการดีลทั้งหมดของผู้ใช้ปัจจุบัน
+ */
+exports.getMyDeals = async (req, res) => {
+  const userId = req.user.id;
+  const role = req.query.role || 'all';
+
+  try {
+    let whereClause;
+    let params;
+
+    if (role === 'seller') {
+      whereClause = 'd.seller_id = $1';
+      params = [userId];
+    } else if (role === 'buyer') {
+      whereClause = 'd.buyer_id = $1';
+      params = [userId];
+    } else {
+      whereClause = '(d.seller_id = $1 OR d.buyer_id = $1)';
+      params = [userId];
+    }
+
+    const result = await pool.query(
+      `SELECT d.*,
+              s.name AS seller_name,
+              s.email AS seller_email,
+              b.name AS buyer_name,
+              b.email AS buyer_email
+       FROM deals d
+       LEFT JOIN users s ON s.id = d.seller_id
+       LEFT JOIN users b ON b.id = d.buyer_id
+       WHERE ${whereClause}
+       ORDER BY d.updated_at DESC`,
+      params
+    );
+
+    res.json({
+      success: true,
+      count: result.rows.length,
+      deals: result.rows,
+    });
+  } catch (err) {
+    console.error('Get My Deals Error:', err);
+    res.status(500).json({
+      error: 'เกิดข้อผิดพลาดในการดึงรายการดีล',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+
+/**
  * GET /api/deals/:dealId
  * ดึงข้อมูลดีลตามรหัส (Buyer ใช้ตอน Join, Seller ใช้ตอนเปิดดู)
  */

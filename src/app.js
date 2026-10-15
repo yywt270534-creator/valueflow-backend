@@ -15,6 +15,7 @@ const authRoutes = require('./routes/authRoutes');
 // const notificationRoutes = require('./routes/notifications');
 // const transactionRoutes = require('./routes/transactionRoutes');
 const dealRoutes = require('./routes/dealRoutes');
+const walletRoutes = require('./routes/walletRoutes');
 // const userRoutes = require('./routes/userRoutes');
 
 const app = express();
@@ -43,7 +44,8 @@ const generalLimiter = rateLimit({
 app.use('/api/auth', authRoutes);
 // app.use('/api/users', userRoutes);
 // app.use('/api/notifications', notificationRoutes);
-app.use('/api/deals', dealRoutes);         
+app.use('/api/deals', dealRoutes); 
+app.use('/api/wallet', walletRoutes);        
 // app.use('/api/chats', chatRoutes);         
 // app.use('/api/payment', paymentRoutes);
 // app.use('/api/transactions', transactionRoutes);

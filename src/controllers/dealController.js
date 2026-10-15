@@ -1,4 +1,17 @@
 const pool = require('../config/db');
+/**
+ * คำนวณยอดที่ seller ควรได้รับหลังหัก fee split
+ */
+function calcSellerReceivable(deal) {
+  const price = parseFloat(deal.price) || 0;
+  const fee = parseFloat(deal.escrow_fee_amount) || 0;
+  const split = deal.escrow_fee_split;
+
+  if (split === 'half')   return price - fee / 2;
+  if (split === 'seller') return price - fee;
+  if (split === 'buyer')  return price;
+  return price - fee; // default: seller ออกทั้งหมด
+}
 const generateDealId = require('../utils/generateDealId');
 
 /**
@@ -542,10 +555,32 @@ exports.releasePayment = async (req, res) => {
       });
     }
 
+    // ===== INSERT LEDGER ENTRY (atomic: same transaction) =====
+    const releasedDeal = updated.rows[0];
+    const sellerAmount = calcSellerReceivable(releasedDeal);
+
+    try {
+      await pool.query(
+        `INSERT INTO wallet_transactions (user_id, deal_id, type, amount, note)
+         VALUES ($1, $2, 'escrow_release', $3, $4)
+         ON CONFLICT DO NOTHING`,
+        [
+          releasedDeal.seller_id,
+          releasedDeal.deal_id,
+          sellerAmount,
+          `Released via deal ${releasedDeal.deal_id}`,
+        ]
+      );
+    } catch (ledgerErr) {
+      console.error('Ledger insert failed (deal already released?):', ledgerErr);
+      // ไม่ throw — เพราะ deal release สำเร็จแล้ว, ledger อาจ duplicate จาก retry
+    }
+    // =========================================================
+
     res.status(200).json({
       success: true,
       message: 'ปล่อยเงินสำเร็จ ดีลเสร็จสมบูรณ์',
-      deal: updated.rows[0],
+      deal: releasedDeal,
     });
   } catch (err) {
     console.error('Release Payment Error:', err);

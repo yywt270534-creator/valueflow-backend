@@ -16,6 +16,7 @@ const authRoutes = require('./routes/authRoutes');
 // const transactionRoutes = require('./routes/transactionRoutes');
 const dealRoutes = require('./routes/dealRoutes');
 const walletRoutes = require('./routes/walletRoutes');
+const adminRoutes = require('./routes/adminRoutes');
 // const userRoutes = require('./routes/userRoutes');
 
 const app = express();
@@ -45,7 +46,8 @@ app.use('/api/auth', authRoutes);
 // app.use('/api/users', userRoutes);
 // app.use('/api/notifications', notificationRoutes);
 app.use('/api/deals', dealRoutes); 
-app.use('/api/wallet', walletRoutes);        
+app.use('/api/wallet', walletRoutes);
+app.use('/api/admin', adminRoutes);        
 // app.use('/api/chats', chatRoutes);         
 // app.use('/api/payment', paymentRoutes);
 // app.use('/api/transactions', transactionRoutes);

@@ -1,5 +1,27 @@
 const pool = require('../config/db');
+const generateDealId = require('../utils/generateDealId');
+
 /**
+ * Validate: ใครสามารถ cancel ได้
+ * STEP_1: seller เท่านั้น | STEP_2: seller หรือ buyer
+ */
+function canCancelDeal(deal, userId) {
+  const isSeller = deal.seller_id === userId;
+  const isBuyer  = deal.buyer_id  === userId;
+  if (deal.status === 'STEP_1_NEGOTIATION') return isSeller;
+  if (deal.status === 'STEP_2_PAYMENT')     return isSeller || isBuyer;
+  return false;
+}
+
+/**
+ * Validate: ใครสามารถ dispute ได้
+ * STEP_3 ถึง RELEASE_PENDING: seller หรือ buyer
+ */
+function canDisputeDeal(deal, userId) {
+  const isParty = deal.seller_id === userId || deal.buyer_id === userId;
+  if (!isParty) return false;
+  return ['STEP_3_SHIPPING', 'STEP_4_INSPECTION', 'RELEASE_PENDING'].includes(deal.status);
+}/**
  * คำนวณยอดที่ seller ควรได้รับหลังหัก fee split
  */
 function calcSellerReceivable(deal) {
@@ -12,7 +34,6 @@ function calcSellerReceivable(deal) {
   if (split === 'buyer')  return price;
   return price - fee; // default: seller ออกทั้งหมด
 }
-const generateDealId = require('../utils/generateDealId');
 
 /**
  * POST /api/deals
@@ -501,6 +522,7 @@ exports.releasePayment = async (req, res) => {
   const { dealId } = req.params;
   const userId = req.user.id;
 
+
   try {
     const dealResult = await pool.query(
       'SELECT * FROM deals WHERE deal_id = $1',
@@ -511,15 +533,11 @@ exports.releasePayment = async (req, res) => {
     }
     const deal = dealResult.rows[0];
 
-    // Permission: ต้องเป็น Buyer หรือ Seller ของดีลนี้
     const isParty = deal.buyer_id === userId || deal.seller_id === userId;
     if (!isParty) {
-      return res.status(403).json({
-        error: 'คุณไม่มีสิทธิ์ปล่อยเงินในดีลนี้'
-      });
+      return res.status(403).json({ error: 'คุณไม่มีสิทธิ์ปล่อยเงินในดีลนี้' });
     }
 
-    // Idempotent: ถ้าปล่อยแล้ว → return 200
     if (deal.escrow_status === 'RELEASED') {
       return res.status(200).json({
         success: true,
@@ -528,14 +546,12 @@ exports.releasePayment = async (req, res) => {
       });
     }
 
-    // ต้องอยู่ RELEASE_PENDING เท่านั้น
     if (deal.status !== 'RELEASE_PENDING' || deal.escrow_status !== 'RELEASE_PENDING') {
       return res.status(400).json({
-        error: `ไม่สามารถปล่อยเงินได้ สถานะปัจจุบัน: ${deal.status} / ${deal.escrow_status}`
+        error: `ไม่สามารถปล่อยเงินได้ สถานะปัจจุบัน: ${deal.status} / ${deal.escrow_status}`,
       });
     }
 
-    // Atomic Update
     const updated = await pool.query(
       `UPDATE deals
        SET status = 'STEP_5_COMPLETED',
@@ -551,11 +567,10 @@ exports.releasePayment = async (req, res) => {
 
     if (updated.rows.length === 0) {
       return res.status(409).json({
-        error: 'ไม่สามารถปล่อยเงินได้ อาจมีการเปลี่ยนสถานะไปแล้ว'
+        error: 'ไม่สามารถปล่อยเงินได้ อาจมีการเปลี่ยนสถานะไปแล้ว',
       });
     }
 
-    // ===== INSERT LEDGER ENTRY (atomic: same transaction) =====
     const releasedDeal = updated.rows[0];
     const sellerAmount = calcSellerReceivable(releasedDeal);
 
@@ -573,9 +588,7 @@ exports.releasePayment = async (req, res) => {
       );
     } catch (ledgerErr) {
       console.error('Ledger insert failed (deal already released?):', ledgerErr);
-      // ไม่ throw — เพราะ deal release สำเร็จแล้ว, ledger อาจ duplicate จาก retry
     }
-    // =========================================================
 
     res.status(200).json({
       success: true,
@@ -590,3 +603,251 @@ exports.releasePayment = async (req, res) => {
     });
   }
 };
+
+/**
+ * POST /api/deals/:dealId/cancel
+ * ยกเลิกดีล (ก่อนโอนเงินเท่านั้น)
+ * Body: { reason }
+ */
+exports.cancelDeal = async (req, res) => {
+  const { dealId } = req.params;
+  const userId = req.user.id;
+  const { reason } = req.body;
+
+  if (!reason || reason.trim().length < 3) {
+    return res.status(400).json({ error: 'กรุณาระบุเหตุผล (อย่างน้อย 3 ตัวอักษร)' });
+  }
+
+  try {
+    const dealResult = await pool.query('SELECT * FROM deals WHERE deal_id = $1', [dealId]);
+    if (dealResult.rows.length === 0) {
+      return res.status(404).json({ error: 'ไม่พบดีลนี้' });
+    }
+    const deal = dealResult.rows[0];
+
+    if (deal.status === 'CANCELLED') {
+      return res.status(200).json({ success: true, message: 'ดีลนี้ถูกยกเลิกแล้ว', deal });
+    }
+
+    if (!canCancelDeal(deal, userId)) {
+      return res.status(403).json({
+        error: 'คุณไม่มีสิทธิ์ยกเลิกดีลนี้ หรือดีลนี้เลยจุดที่ยกเลิกได้แล้ว',
+      });
+    }
+
+    const updated = await pool.query(
+      `UPDATE deals
+       SET status = 'CANCELLED',
+           cancelled_at = NOW(),
+           cancelled_by = $1,
+           cancel_reason = $2,
+           updated_at = NOW()
+       WHERE deal_id = $3
+         AND status IN ('STEP_1_NEGOTIATION', 'STEP_2_PAYMENT')
+         AND (seller_id = $1 OR buyer_id = $1)
+       RETURNING *`,
+      [userId, reason.trim(), dealId]
+    );
+
+    if (updated.rows.length === 0) {
+      return res.status(409).json({ error: 'ไม่สามารถยกเลิกได้ สถานะอาจเปลี่ยนไปแล้ว' });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'ยกเลิกดีลสำเร็จ',
+      deal: updated.rows[0],
+    });
+  } catch (err) {
+    console.error('Cancel Deal Error:', err);
+    res.status(500).json({
+      error: 'เกิดข้อผิดพลาดในการยกเลิกดีล',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * POST /api/deals/:dealId/dispute
+ * เปิดข้อพิพาท (หลังโอนเงินแล้วเท่านั้น)
+ * Body: { reason, detail }
+ */
+exports.disputeDeal = async (req, res) => {
+  const { dealId } = req.params;
+  const userId = req.user.id;
+  const { reason, detail } = req.body;
+
+  if (!reason || reason.trim().length < 3) {
+    return res.status(400).json({ error: 'กรุณาระบุเหตุผล' });
+  }
+  if (!detail || detail.trim().length < 10) {
+    return res.status(400).json({ error: 'กรุณาอธิบายรายละเอียด (อย่างน้อย 10 ตัวอักษร)' });
+  }
+
+  try {
+    const dealResult = await pool.query('SELECT * FROM deals WHERE deal_id = $1', [dealId]);
+    if (dealResult.rows.length === 0) {
+      return res.status(404).json({ error: 'ไม่พบดีลนี้' });
+    }
+    const deal = dealResult.rows[0];
+
+    if (deal.status === 'DISPUTED') {
+      return res.status(200).json({ success: true, message: 'ดีลนี้เปิดข้อพิพาทอยู่แล้ว', deal });
+    }
+
+    if (!canDisputeDeal(deal, userId)) {
+      return res.status(403).json({
+        error: 'คุณไม่มีสิทธิ์เปิดข้อพิพาทในดีลนี้ หรือสถานะยังไม่ถึงขั้น',
+      });
+    }
+
+    const updated = await pool.query(
+      `UPDATE deals
+       SET status = 'DISPUTED',
+           disputed_at = NOW(),
+           disputed_by = $1,
+           dispute_reason = $2,
+           dispute_detail = $3,
+           updated_at = NOW()
+       WHERE deal_id = $4
+         AND status IN ('STEP_3_SHIPPING', 'STEP_4_INSPECTION', 'RELEASE_PENDING')
+         AND (seller_id = $1 OR buyer_id = $1)
+       RETURNING *`,
+      [userId, reason.trim(), detail.trim(), dealId]
+    );
+
+    if (updated.rows.length === 0) {
+      return res.status(409).json({ error: 'ไม่สามารถเปิดข้อพิพาทได้ สถานะอาจเปลี่ยนไปแล้ว' });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'เปิดข้อพิพาทสำเร็จ ทีมงานจะติดต่อกลับภายใน 24 ชม.',
+      deal: updated.rows[0],
+    });
+  } catch (err) {
+    console.error('Dispute Deal Error:', err);
+    res.status(500).json({
+      error: 'เกิดข้อผิดพลาดในการเปิดข้อพิพาท',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * POST /api/deals/:dealId/resolve
+ * Admin resolve ข้อพิพาท
+ * Body: { resolution, buyerAmount?, sellerAmount?, note? }
+ */
+exports.resolveDispute = async (req, res) => {
+  const { dealId } = req.params;
+  const adminId = req.user.id;
+  const { resolution, buyerAmount, sellerAmount, note } = req.body;
+
+  if (!['refund_buyer', 'release_seller', 'split'].includes(resolution)) {
+    return res.status(400).json({
+      error: 'resolution ต้องเป็น refund_buyer | release_seller | split',
+    });
+  }
+
+  try {
+    const dealResult = await pool.query('SELECT * FROM deals WHERE deal_id = $1', [dealId]);
+    if (dealResult.rows.length === 0) {
+      return res.status(404).json({ error: 'ไม่พบดีลนี้' });
+    }
+    const deal = dealResult.rows[0];
+
+    if (deal.status !== 'DISPUTED') {
+      return res.status(400).json({ error: `ดีลนี้ไม่ได้อยู่ในสถานะพิพาท (ปัจจุบัน: ${deal.status})` });
+    }
+
+    const price = parseFloat(deal.price) || 0;
+    const fee = parseFloat(deal.escrow_fee_amount) || 0;
+    const splitType = deal.escrow_fee_split;
+
+    const buyerFeeShare =
+      splitType === 'buyer' ? fee : splitType === 'half' ? fee / 2 : 0;
+    const sellerFeeShare =
+      splitType === 'seller' ? fee : splitType === 'half' ? fee / 2 : 0;
+
+    const buyerPaid = price + buyerFeeShare;
+    const sellerReceivable = price - sellerFeeShare;
+    const escrowTotal = price + fee;
+
+    let buyerRefund = 0;
+    let sellerRelease = 0;
+
+    if (resolution === 'refund_buyer') {
+      buyerRefund = buyerPaid;
+    } else if (resolution === 'release_seller') {
+      sellerRelease = sellerReceivable;
+    } else {
+      buyerRefund = parseFloat(buyerAmount) || 0;
+      sellerRelease = parseFloat(sellerAmount) || 0;
+
+      if (buyerRefund < 0 || sellerRelease < 0) {
+        return res.status(400).json({ error: 'จำนวนเงินต้องไม่ติดลบ' });
+      }
+      if (buyerRefund + sellerRelease > escrowTotal) {
+        return res.status(400).json({
+          error: `ยอดรวม (${buyerRefund + sellerRelease}) เกิน escrow (${escrowTotal})`,
+        });
+      }
+    }
+
+    const updated = await pool.query(
+      `UPDATE deals
+       SET status = 'STEP_5_COMPLETED',
+           escrow_status = 'RELEASED',
+           released_at = NOW(),
+           resolved_at = NOW(),
+           resolved_by = $1,
+           resolution = $2,
+           updated_at = NOW()
+       WHERE deal_id = $3
+         AND status = 'DISPUTED'
+       RETURNING *`,
+      [adminId, resolution, dealId]
+    );
+
+    if (updated.rows.length === 0) {
+      return res.status(409).json({ error: 'ไม่สามารถ resolve ได้ สถานะอาจเปลี่ยนไปแล้ว' });
+    }
+
+    const ledgerNote = `Dispute resolved (${resolution})${note ? ' — ' + note : ''}`;
+
+    try {
+      if (buyerRefund > 0 && deal.buyer_id) {
+        await pool.query(
+          `INSERT INTO wallet_transactions (user_id, deal_id, type, amount, note)
+           VALUES ($1, $2, 'escrow_refund', $3, $4)
+           ON CONFLICT DO NOTHING`,
+          [deal.buyer_id, deal.deal_id, buyerRefund, ledgerNote]
+        );
+      }
+      if (sellerRelease > 0) {
+        await pool.query(
+          `INSERT INTO wallet_transactions (user_id, deal_id, type, amount, note)
+           VALUES ($1, $2, 'escrow_release', $3, $4)
+           ON CONFLICT DO NOTHING`,
+          [deal.seller_id, deal.deal_id, sellerRelease, ledgerNote]
+        );
+      }
+    } catch (ledgerErr) {
+      console.error('Ledger insert during resolve failed:', ledgerErr);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'resolve ข้อพิพาทสำเร็จ',
+      deal: updated.rows[0],
+      ledger: { buyerRefund, sellerRelease },
+    });
+  } catch (err) {
+    console.error('Resolve Dispute Error:', err);
+    res.status(500).json({
+      error: 'เกิดข้อผิดพลาดในการ resolve',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};  

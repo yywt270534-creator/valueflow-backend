@@ -8,7 +8,9 @@ const {
   shipDeal,
   confirmReceipt,
   releasePayment,
-  getMyDeals
+  getMyDeals,
+  cancelDeal,
+  disputeDeal
 } = require('../controllers/dealController');
 const authMiddleware = require('../middleware/authMiddleware');
 
@@ -22,5 +24,6 @@ router.post('/:dealId/confirm-payment', confirmPayment);
 router.post('/:dealId/ship', shipDeal);
 router.post('/:dealId/confirm-receipt', confirmReceipt);
 router.post('/:dealId/release', releasePayment);  // 👈 เพิ่ม
-
+router.post('/:dealId/cancel', cancelDeal);
+router.post('/:dealId/dispute', disputeDeal);
 module.exports = router;

@@ -1,5 +1,6 @@
 const pool = require('../config/db');
 const generateDealId = require('../utils/generateDealId');
+const { supabase, BUCKET } = require('../supabase');
 
 /**
  * Validate: ใครสามารถ cancel ได้
@@ -851,3 +852,115 @@ exports.resolveDispute = async (req, res) => {
     });
   }
 };  
+
+/**
+ * POST /api/deals/:dealId/evidence
+ * Seller อัปโหลดหลักฐาน — max 5 ไฟล์/ดีล, 2MB/ไฟล์
+ */
+exports.uploadEvidence = async (req, res) => {
+  const { dealId } = req.params;
+  const userId = req.user.id;
+
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'กรุณาแนบไฟล์' });
+    }
+
+    const dealResult = await pool.query('SELECT * FROM deals WHERE deal_id = $1', [dealId]);
+    if (dealResult.rows.length === 0) {
+      return res.status(404).json({ error: 'ไม่พบดีลนี้' });
+    }
+    const deal = dealResult.rows[0];
+
+    if (deal.seller_id !== userId) {
+      return res.status(403).json({ error: 'เฉพาะผู้ขายเท่านั้นที่อัปโหลดหลักฐานได้' });
+    }
+
+    const countResult = await pool.query(
+      'SELECT COUNT(*)::int AS cnt FROM deal_evidence WHERE deal_id = $1',
+      [deal.deal_id]
+    );
+    if (countResult.rows[0].cnt >= 5) {
+      return res.status(400).json({ error: 'อัปโหลดครบ 5 ไฟล์แล้ว' });
+    }
+
+    const file = req.file;
+    const ext = file.originalname.split('.').pop().toLowerCase();
+    const storagePath = `${deal.deal_id}/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+
+    const { error: uploadErr } = await supabase.storage
+      .from(BUCKET)
+      .upload(storagePath, file.buffer, {
+        contentType: file.mimetype,
+        upsert: false,
+      });
+    if (uploadErr) {
+      console.error('Supabase upload error:', uploadErr);
+      return res.status(500).json({ error: 'อัปโหลดไฟล์ไม่สำเร็จ', details: uploadErr.message });
+    }
+
+    const insertResult = await pool.query(
+      `INSERT INTO deal_evidence
+         (deal_id, uploaded_by, phase, file_url, file_name, mime_type, file_size)
+       VALUES ($1, $2, 'shipping', $3, $4, $5, $6)
+       RETURNING *`,
+      [deal.deal_id, userId, storagePath, file.originalname, file.mimetype, file.size]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'อัปโหลดหลักฐานสำเร็จ',
+      evidence: insertResult.rows[0],
+    });
+  } catch (err) {
+    console.error('Upload Evidence Error:', err);
+    res.status(500).json({
+      error: 'เกิดข้อผิดพลาด',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+/**
+ * GET /api/deals/:dealId/evidence
+ * ดึงรายการหลักฐาน + signed URL (1 ชั่วโมง)
+ */
+exports.getEvidence = async (req, res) => {
+  const { dealId } = req.params;
+  const userId = req.user.id;
+
+  try {
+    const dealResult = await pool.query('SELECT * FROM deals WHERE deal_id = $1', [dealId]);
+    if (dealResult.rows.length === 0) {
+      return res.status(404).json({ error: 'ไม่พบดีลนี้' });
+    }
+    const deal = dealResult.rows[0];
+
+    const isParty = deal.seller_id === userId || deal.buyer_id === userId;
+    if (!isParty && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'คุณไม่มีสิทธิ์ดูหลักฐานของดีลนี้' });
+    }
+
+    const result = await pool.query(
+      'SELECT * FROM deal_evidence WHERE deal_id = $1 ORDER BY created_at ASC',
+      [deal.deal_id]
+    );
+
+    const items = await Promise.all(
+      result.rows.map(async (row) => {
+        const { data } = await supabase.storage
+          .from(BUCKET)
+          .createSignedUrl(row.file_url, 3600);
+        return { ...row, signed_url: data?.signedUrl || null };
+      })
+    );
+
+    res.json({ success: true, count: items.length, evidence: items });
+  } catch (err) {
+    console.error('Get Evidence Error:', err);
+    res.status(500).json({
+      error: 'เกิดข้อผิดพลาด',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};

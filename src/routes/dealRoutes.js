@@ -10,9 +10,11 @@ const {
   releasePayment,
   getMyDeals,
   cancelDeal,
-  disputeDeal
+  disputeDeal,
+  uploadEvidence, getEvidence
 } = require('../controllers/dealController');
 const authMiddleware = require('../middleware/authMiddleware');
+const upload = require('../middleware/uploadMiddleware');
 
 router.use(authMiddleware);
 
@@ -26,4 +28,6 @@ router.post('/:dealId/confirm-receipt', confirmReceipt);
 router.post('/:dealId/release', releasePayment);  // 👈 เพิ่ม
 router.post('/:dealId/cancel', cancelDeal);
 router.post('/:dealId/dispute', disputeDeal);
+router.post('/:dealId/evidence', upload.single('file'), uploadEvidence);
+router.get('/:dealId/evidence', getEvidence);
 module.exports = router;

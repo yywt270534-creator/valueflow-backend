@@ -13,6 +13,7 @@ const {
   disputeDeal,
   uploadEvidence, getEvidence
 } = require('../controllers/dealController');
+const { sendMessage, getMessages } = require('../controllers/chatController');
 const authMiddleware = require('../middleware/authMiddleware');
 const upload = require('../middleware/uploadMiddleware');
 
@@ -30,4 +31,6 @@ router.post('/:dealId/cancel', cancelDeal);
 router.post('/:dealId/dispute', disputeDeal);
 router.post('/:dealId/evidence', upload.single('file'), uploadEvidence);
 router.get('/:dealId/evidence', getEvidence);
+router.post('/:dealId/messages', sendMessage);
+router.get('/:dealId/messages', getMessages);
 module.exports = router;

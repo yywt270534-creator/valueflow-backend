@@ -1,91 +1,82 @@
-const db = require('../config/db');
+const pool = require('../config/db');
 
-// 1. ดึงข้อความแชททั้งหมดของดีล
-const getDealChats = async (req, res) => {
+// POST /api/deals/:dealId/messages
+exports.sendMessage = async (req, res) => {
   const { dealId } = req.params;
   const userId = req.user.id;
-  const userRole = req.user.role;
-
-  try {
-    // ตรวจสอบสิทธิ์: ผู้ใช้ต้องเป็น buyer, seller หรือ admin เท่านั้น
-    const deal = await db.query(
-      'SELECT buyer_id, seller_id FROM deals WHERE id = $1', 
-      [dealId]
-    );
-
-    if (deal.rows.length === 0) {
-      return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลดีลนี้' });
-    }
-
-    const { buyer_id, seller_id } = deal.rows[0];
-    if (buyer_id !== userId && seller_id !== userId && userRole !== 'admin') {
-      return res.status(403).json({ success: false, message: 'คุณไม่มีสิทธิ์เข้าถึงข้อมูลแชทของดีลนี้' });
-    }
-
-    // ดึงประวัติแชทพร้อมข้อมูลผู้ส่ง
-    const chats = await db.query(
-      `SELECT c.id, c.sender_id, c.message, c.created_at, u.email as sender_email 
-       FROM deal_chats c
-       JOIN users u ON c.sender_id = u.id
-       WHERE c.deal_id = $1
-       ORDER BY c.created_at ASC`,
-      [dealId]
-    );
-
-    res.status(200).json({ success: true, data: chats.rows });
-  } catch (err) {
-    console.error('getDealChats Error:', err.message);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการดึงข้อความแชท' });
-  }
-};
-
-// 2. ส่งข้อความแชทใหม่ในดีล
-const sendMessage = async (req, res) => {
-  const { dealId } = req.params;
   const { message } = req.body;
-  const userId = req.user.id;
-  const userRole = req.user.role;
 
-  if (!message || message.trim() === '') {
-    return res.status(400).json({ success: false, message: 'กรุณากรอกข้อความ' });
+  if (!message || message.trim().length === 0) {
+    return res.status(400).json({ error: 'กรุณาพิมพ์ข้อความ' });
   }
 
   try {
-    // ตรวจสอบสิทธิ์คู่ค้าในดีลก่อนบันทึก
-    const deal = await db.query(
-      'SELECT buyer_id, seller_id FROM deals WHERE id = $1', 
-      [dealId]
-    );
-
-    if (deal.rows.length === 0) {
-      return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลดีลนี้' });
+    // 1. หา deal + เช็คว่าเป็น buyer/seller ในดีลนี้
+    const dealResult = await pool.query('SELECT * FROM deals WHERE deal_id = $1', [dealId]);
+    if (dealResult.rows.length === 0) {
+      return res.status(404).json({ error: 'ไม่พบดีลนี้' });
+    }
+    const deal = dealResult.rows[0];
+    const isParty = deal.seller_id === userId || deal.buyer_id === userId;
+    if (!isParty) {
+      return res.status(403).json({ error: 'คุณไม่มีสิทธิ์ส่งข้อความในดีลนี้' });
     }
 
-    const { buyer_id, seller_id } = deal.rows[0];
-    if (buyer_id !== userId && seller_id !== userId && userRole !== 'admin') {
-      return res.status(403).json({ success: false, message: 'คุณไม่มีสิทธิ์ส่งข้อความในดีลนี้' });
-    }
-
-    // บันทึกข้อความแชทใหม่
-    const newChat = await db.query(
-      `INSERT INTO deal_chats (deal_id, sender_id, message) 
-       VALUES ($1, $2, $3) 
+    // 2. Insert message
+    const result = await pool.query(
+      `INSERT INTO deal_messages (deal_id, sender_id, message, type)
+       VALUES ($1, $2, $3, 'text')
        RETURNING *`,
-      [dealId, userId, message]
+      [dealId, userId, message.trim()]
     );
 
     res.status(201).json({
       success: true,
       message: 'ส่งข้อความสำเร็จ',
-      data: newChat.rows[0]
+      data: result.rows[0],
     });
   } catch (err) {
-    console.error('sendMessage Error:', err.message);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการส่งข้อความ' });
+    console.error('Send Message Error:', err);
+    res.status(500).json({
+      error: 'เกิดข้อผิดพลาดในการส่งข้อความ',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
   }
 };
 
-module.exports = {
-  getDealChats,
-  sendMessage
+// GET /api/deals/:dealId/messages
+exports.getMessages = async (req, res) => {
+  const { dealId } = req.params;
+  const userId = req.user.id;
+
+  try {
+    const dealResult = await pool.query('SELECT * FROM deals WHERE deal_id = $1', [dealId]);
+    if (dealResult.rows.length === 0) {
+      return res.status(404).json({ error: 'ไม่พบดีลนี้' });
+    }
+    const deal = dealResult.rows[0];
+    const isParty = deal.seller_id === userId || deal.buyer_id === userId;
+    if (!isParty && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'คุณไม่มีสิทธิ์ดูข้อความในดีลนี้' });
+    }
+
+    // Join users เพื่อดึงชื่อคนส่ง
+    const result = await pool.query(
+      `SELECT m.*, u.name AS sender_name
+       FROM deal_messages m
+       LEFT JOIN users u ON u.id = m.sender_id
+       WHERE m.deal_id = $1
+       ORDER BY m.created_at ASC
+       LIMIT 100`,
+      [dealId]
+    );
+
+    res.json({ success: true, count: result.rows.length, messages: result.rows });
+  } catch (err) {
+    console.error('Get Messages Error:', err);
+    res.status(500).json({
+      error: 'เกิดข้อผิดพลาดในการดึงข้อความ',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
 };

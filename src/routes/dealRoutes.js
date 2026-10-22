@@ -11,7 +11,7 @@ const {
   getMyDeals,
   cancelDeal,
   disputeDeal,
-  uploadEvidence, getEvidence
+uploadEvidence, getEvidence, hideDeal
 } = require('../controllers/dealController');
 const { sendMessage, getMessages } = require('../controllers/chatController');
 const authMiddleware = require('../middleware/authMiddleware');
@@ -28,6 +28,7 @@ router.post('/:dealId/ship', shipDeal);
 router.post('/:dealId/confirm-receipt', confirmReceipt);
 router.post('/:dealId/release', releasePayment);  // 👈 เพิ่ม
 router.post('/:dealId/cancel', cancelDeal);
+router.patch('/:dealId/hide', hideDeal);
 router.post('/:dealId/dispute', disputeDeal);
 router.post('/:dealId/evidence', upload.single('file'), uploadEvidence);
 router.get('/:dealId/evidence', getEvidence);

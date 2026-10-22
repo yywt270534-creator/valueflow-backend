@@ -14,6 +14,16 @@ function canCancelDeal(deal, userId) {
   return false;
 }
 
+function canHideDeal(deal) {
+  if (deal.status === 'STEP_5_COMPLETED') return true;
+  if (deal.status === 'CANCELLED') return true;
+  if (deal.status === 'STEP_1_NEGOTIATION') {
+    const created = new Date(deal.created_at).getTime();
+    return (Date.now() - created) > 7 * 24 * 60 * 60 * 1000;
+  }
+  return false;
+}
+
 /**
  * Validate: ใครสามารถ dispute ได้
  * STEP_3 ถึง RELEASE_PENDING: seller หรือ buyer
@@ -132,13 +142,13 @@ exports.getMyDeals = async (req, res) => {
     let params;
 
     if (role === 'seller') {
-      whereClause = 'd.seller_id = $1';
+      whereClause = 'd.seller_id = $1 AND d.hidden_by_seller = false';
       params = [userId];
     } else if (role === 'buyer') {
-      whereClause = 'd.buyer_id = $1';
+      whereClause = 'd.buyer_id = $1 AND d.hidden_by_buyer = false';
       params = [userId];
     } else {
-      whereClause = '(d.seller_id = $1 OR d.buyer_id = $1)';
+      whereClause = '(d.seller_id = $1 AND d.hidden_by_seller = false) OR (d.buyer_id = $1 AND d.hidden_by_buyer = false)';
       params = [userId];
     }
 
@@ -958,6 +968,53 @@ exports.getEvidence = async (req, res) => {
     res.json({ success: true, count: items.length, evidence: items });
   } catch (err) {
     console.error('Get Evidence Error:', err);
+    res.status(500).json({
+      error: 'เกิดข้อผิดพลาด',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+};
+
+exports.hideDeal = async (req, res) => {
+  const { dealId } = req.params;
+  const userId = req.user.id;
+
+  try {
+    const dealResult = await pool.query('SELECT * FROM deals WHERE deal_id = $1', [dealId]);
+    if (dealResult.rows.length === 0) {
+      return res.status(404).json({ error: 'ไม่พบดีลนี้' });
+    }
+    const deal = dealResult.rows[0];
+
+    const isSeller = deal.seller_id === userId;
+    const isBuyer = deal.buyer_id === userId;
+
+    if (!isSeller && !isBuyer) {
+      return res.status(403).json({ error: 'คุณไม่มีสิทธิ์ในดีลนี้' });
+    }
+
+    if (!canHideDeal(deal)) {
+      return res.status(400).json({ error: 'ไม่สามารถซ่อนดีลนี้ได้ (สถานะไม่เหมาะสม หรือยังไม่ครบ 7 วัน)' });
+    }
+
+    const columnToUpdate = isSeller ? 'hidden_by_seller' : 'hidden_by_buyer';
+    
+    const updated = await pool.query(
+      `UPDATE deals
+       SET ${columnToUpdate} = true,
+           updated_at = NOW()
+       WHERE deal_id = $1
+       RETURNING *`,
+      [dealId]
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'ซ่อนดีลสำเร็จ',
+      deal: updated.rows[0],
+    });
+  } catch (err) {
+    console.error('Hide Deal Error:', err);
     res.status(500).json({
       error: 'เกิดข้อผิดพลาด',
       details: process.env.NODE_ENV === 'development' ? err.message : undefined,

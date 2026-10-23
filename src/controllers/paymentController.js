@@ -4,18 +4,24 @@ const omise = require('../../omise');
 // 1. API สำหรับสร้างคำสั่งชำระเงิน (Create Charge)
 const createPaymentIntent = async (req, res) => {
     try {
-        const { deal_id, amount } = req.body; // amount มีหน่วยเป็นสตางค์
+const { deal_id } = req.body;
+if (!deal_id) {
+    return res.status(400).json({ success: false, message: 'กรุณาระบุ deal_id' });
+}
+const dealRes = await db.query('SELECT buyer_id, price, fee FROM deals WHERE deal_id = $1', [deal_id]);
+if (dealRes.rows.length === 0) return res.status(404).json({ success: false, message: 'ไม่พบดีล' });
+const deal = dealRes.rows[0];
+if (deal.buyer_id !== req.user.id) return res.status(403).json({ success: false, message: 'คุณไม่มีสิทธิ์ชำระเงินดีลนี้' });
+const amount = Math.round((parseFloat(deal.price) + parseFloat(deal.fee || 0)) * 100);
 
-        if (!deal_id || !amount) {
-            return res.status(400).json({ success: false, message: 'กรุณาระบุ deal_id และ amount ให้ครบถ้วน' });
-        }
-
-const charge = await omise.charges.create({
-    amount: amount,
-    currency: 'thb',
-    ...(req.body.token ? { card: req.body.token } : { source: req.body.source_id }),
-    metadata: { deal_id: deal_id.toString() }
-});
+const { method, token } = req.body;
+let charge;
+if (method === 'promptpay') {
+    const source = await omise.sources.create({ type: 'promptpay', amount, currency: 'thb' });
+    charge = await omise.charges.create({ amount, currency: 'thb', source: source.id, metadata: { deal_id: deal_id.toString() } });
+} else {
+    charge = await omise.charges.create({ amount, currency: 'thb', card: token, metadata: { deal_id: deal_id.toString() } });
+}
 
         res.status(200).json({
             success: true,
@@ -43,6 +49,17 @@ const handlePaymentWebhook = async (req, res) => {
     }
 
     const chargeId = event.data?.id;
+            // 🔒 Security Check: Verify charge with Omise API directly
+        const realCharge = await omise.charges.retrieve(chargeId);
+        if (realCharge.status !== 'successful') {
+            console.error(`Webhook Error: Charge ${chargeId} status is ${realCharge.status}, not successful`);
+            return res.status(400).json({ success: false, message: 'การชำระเงินยังไม่สำเร็จ' });
+        }
+        // Check amount match (realCharge.amount is in satangs)
+        if (Number(realCharge.amount) !== Number(amount)) {
+            console.error(`Webhook Error: Amount mismatch. Expected ${amount}, got ${realCharge.amount}`);
+            return res.status(400).json({ success: false, message: 'ยอดเงินไม่ตรงกัน' });
+        }
     const deal_id = event.data?.metadata?.deal_id;
 
     if (!chargeId || !deal_id) {

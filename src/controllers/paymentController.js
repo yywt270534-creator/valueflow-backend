@@ -1,7 +1,7 @@
 const db = require('../config/db');
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const omise = require('../../omise');
 
-// 1. API สำหรับสร้างคำสั่งชำระเงิน (Create Payment Intent)
+// 1. API สำหรับสร้างคำสั่งชำระเงิน (Create Charge)
 const createPaymentIntent = async (req, res) => {
     try {
         const { deal_id, amount } = req.body; // amount มีหน่วยเป็นสตางค์
@@ -10,75 +10,64 @@ const createPaymentIntent = async (req, res) => {
             return res.status(400).json({ success: false, message: 'กรุณาระบุ deal_id และ amount ให้ครบถ้วน' });
         }
 
-        const paymentIntent = await stripe.paymentIntents.create({
-            amount: amount,
-            currency: 'thb',
-            metadata: { deal_id: deal_id.toString() }
-        });
+const charge = await omise.charges.create({
+    amount: amount,
+    currency: 'thb',
+    ...(req.body.token ? { card: req.body.token } : { source: req.body.source_id }),
+    metadata: { deal_id: deal_id.toString() }
+});
 
         res.status(200).json({
             success: true,
-            clientSecret: paymentIntent.client_secret,
-            paymentIntentId: paymentIntent.id
+            chargeId: charge.id,
+            status: charge.status,
+            qrCode: charge.source?.scannable_code?.image?.download_uri || null
         });
     } catch (error) {
-        // ดึงเฉพาะข้อความ Error ที่อ่านเข้าใจง่ายออกมาแสดงใน Terminal
-        console.error('Create Payment Intent Error:', error.message);
-        
-        // ส่งข้อความ Error กลับไปแสดงที่ Thunder Client ชั่วคราวเพื่อให้เราวิเคราะห์ง่ายขึ้น
+        console.error('Create Charge Error:', error.message);
         res.status(500).json({ 
             success: false, 
-            message: 'เกิดข้อผิดพลาดในการสร้างคำสั่งชำระเงินกับ Stripe',
-            stripeError: error.message 
+            message: 'เกิดข้อผิดพลาดในการสร้างคำสั่งชำระเงินกับ Omise',
+            errorDetails: error.message 
         });
     }
-}; // <--- [จุดที่แก้ไข] เพิ่มปีกกาปิดและเซมิโคลอนตรงนี้ให้ฟังก์ชัน createPaymentIntent
+};
 
 // 2. Webhook สำหรับรับแจ้งเตือนการชำระเงินสำเร็จ
 const handlePaymentWebhook = async (req, res) => {
-    const sig = req.headers['stripe-signature'];
-    let event;
-
-    try {
-        event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-    } catch (err) {
-        console.error(`⚠️ Webhook signature verification failed:`, err.message);
-        return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    if (event.type !== 'payment_intent.succeeded') {
+    const event = req.body;
+    
+    // Omise webhook ไม่มี signature ให้ตรวจสอบ
+    if (event.key !== 'charge.complete') {
         return res.status(200).json({ message: 'Event ignored' });
     }
 
-    const paymentIntent = event.data.object;
-    const deal_id = paymentIntent.metadata?.deal_id;
+    const chargeId = event.data?.id;
+    const deal_id = event.data?.metadata?.deal_id;
 
-    if (!deal_id) {
-        console.error('Webhook Error: Missing deal_id in payment intent metadata');
-        return res.status(400).json({ success: false, message: 'ไม่พบรหัสดีลใน metadata' });
+    if (!chargeId || !deal_id) {
+        console.error('Webhook Error: Missing chargeId or deal_id');
+        return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบถ้วน' });
     }
 
+    // อัปเดต DB ตาม Handoff: STEP_2_PAYMENT -> STEP_3_SHIPPING
     const client = await db.connect();
-
     try {
         await client.query('BEGIN');
 
-        // ส่งเฉพาะ deal_id เข้าไปที่ $1 ให้ถูกต้อง
         const updateDeal = await client.query(
-            `UPDATE deals SET status = 'paid', updated_at = NOW() WHERE id = $1 RETURNING *`,
+            `UPDATE deals SET status = 'STEP_3_SHIPPING', updated_at = NOW() WHERE id = $1 AND status = 'STEP_2_PAYMENT' RETURNING *`,
             [deal_id]
         );
 
         if (updateDeal.rows.length === 0) {
             await client.query('ROLLBACK');
-            console.error(`Webhook Error: Deal #${deal_id} not found in database`);
-            return res.status(404).json({ success: false, message: 'ไม่พบดีลนี้ในระบบ' });
+            console.error(`Webhook Error: Deal #${deal_id} not found or status is not STEP_2_PAYMENT`);
+            return res.status(404).json({ success: false, message: 'ไม่พบดีลนี้หรือสถานะไม่ถูกต้อง' });
         }
 
         const deal = updateDeal.rows[0];
-
-        // สร้างการแจ้งเตือนให้กับผู้ซื้อและผู้ขาย
-        const notificationMessage = `ดีล #${deal.id} ได้รับการชำระเงินเรียบร้อยแล้ว สถานะเปลี่ยนเป็น 'paid'`;
+        const notificationMessage = `ดีล #${deal.id} ได้รับการชำระเงินเรียบร้อยแล้ว สถานะเปลี่ยนเป็น 'STEP_3_SHIPPING'`;
         
         await client.query(
             `INSERT INTO notifications (user_id, title, message, deal_id, is_read, created_at) 
@@ -87,7 +76,7 @@ const handlePaymentWebhook = async (req, res) => {
         );
 
         await client.query('COMMIT');
-        console.log(`✅ Deal #${deal.id} successfully updated to 'paid' via Stripe Webhook`);
+        console.log(`✅ Deal #${deal.id} successfully updated to 'STEP_3_SHIPPING' via Omise Webhook`);
         res.status(200).json({ received: true });
 
     } catch (error) {

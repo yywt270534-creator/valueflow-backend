@@ -11,7 +11,7 @@ require('dotenv').config();
 const authRoutes = require('./routes/authRoutes');
 // const apiRoutes = require('./routes/api');
 // const chatRoutes = require('./routes/chat');
-// const paymentRoutes = require('./routes/payment');
+const paymentRoutes = require('./routes/payment');
 // const notificationRoutes = require('./routes/notifications');
 // const transactionRoutes = require('./routes/transactionRoutes');
 const dealRoutes = require('./routes/dealRoutes');
@@ -49,7 +49,7 @@ app.use('/api/deals', dealRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/admin', adminRoutes);        
 // app.use('/api/chats', chatRoutes);         
-// app.use('/api/payment', paymentRoutes);
+app.use('/api/payment', paymentRoutes);
 // app.use('/api/transactions', transactionRoutes);
 // app.use('/api', apiRoutes);
 

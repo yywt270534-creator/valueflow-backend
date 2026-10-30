@@ -745,6 +745,22 @@ exports.disputeDeal = async (req, res) => {
   }
 };
 
+exports.getDisputedDeals = async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT d.*, s.name AS seller_name, b.name AS buyer_name
+       FROM deals d
+       LEFT JOIN users s ON s.id = d.seller_id
+       LEFT JOIN users b ON b.id = d.buyer_id
+       WHERE d.status = 'DISPUTED'
+       ORDER BY d.updated_at DESC`
+    );
+    res.json({ success: true, count: result.rows.length, deals: result.rows });
+  } catch (err) {
+    console.error('Get Disputed Deals Error:', err);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดในการดึงรายการข้อพิพาท' });
+  }
+};
 /**
  * POST /api/deals/:dealId/resolve
  * Admin resolve ข้อพิพาท
@@ -806,62 +822,56 @@ exports.resolveDispute = async (req, res) => {
       }
     }
 
-    const updated = await pool.query(
-      `UPDATE deals
-       SET status = 'STEP_5_COMPLETED',
-           escrow_status = 'RELEASED',
-           released_at = NOW(),
-           resolved_at = NOW(),
-           resolved_by = $1,
-           resolution = $2,
-           updated_at = NOW()
-       WHERE deal_id = $3
-         AND status = 'DISPUTED'
-       RETURNING *`,
-      [adminId, resolution, dealId]
-    );
-
-    if (updated.rows.length === 0) {
-      return res.status(409).json({ error: 'ไม่สามารถ resolve ได้ สถานะอาจเปลี่ยนไปแล้ว' });
-    }
-
     const ledgerNote = `Dispute resolved (${resolution})${note ? ' — ' + note : ''}`;
-
+    const client = await pool.connect();
     try {
+      await client.query('BEGIN');
+
+      const updated = await client.query(
+        `UPDATE deals SET status = 'STEP_5_COMPLETED', escrow_status = 'RELEASED', released_at = NOW(), resolved_at = NOW(), resolved_by = $1, resolution = $2, updated_at = NOW() WHERE deal_id = $3 AND status = 'DISPUTED' RETURNING *`,
+        [adminId, resolution, dealId]
+      );
+
+      if (updated.rows.length === 0) throw new Error('CONFLICT');
+
       if (buyerRefund > 0 && deal.buyer_id) {
-        await pool.query(
-          `INSERT INTO wallet_transactions (user_id, deal_id, type, amount, note)
-           VALUES ($1, $2, 'escrow_refund', $3, $4)
-           ON CONFLICT DO NOTHING`,
+        await client.query(
+          `INSERT INTO wallet_transactions (user_id, deal_id, type, amount, note) VALUES ($1, $2, 'escrow_refund', $3, $4) ON CONFLICT DO NOTHING`,
           [deal.buyer_id, deal.deal_id, buyerRefund, ledgerNote]
         );
       }
+
       if (sellerRelease > 0) {
-        await pool.query(
-          `INSERT INTO wallet_transactions (user_id, deal_id, type, amount, note)
-           VALUES ($1, $2, 'escrow_release', $3, $4)
-           ON CONFLICT DO NOTHING`,
+        await client.query(
+          `INSERT INTO wallet_transactions (user_id, deal_id, type, amount, note) VALUES ($1, $2, 'escrow_release', $3, $4) ON CONFLICT DO NOTHING`,
           [deal.seller_id, deal.deal_id, sellerRelease, ledgerNote]
         );
       }
-    } catch (ledgerErr) {
-      console.error('Ledger insert during resolve failed:', ledgerErr);
-    }
 
-    res.status(200).json({
-      success: true,
-      message: 'resolve ข้อพิพาทสำเร็จ',
-      deal: updated.rows[0],
-      ledger: { buyerRefund, sellerRelease },
-    });
+      await client.query('COMMIT');
+      client.release();
+
+      return res.status(200).json({
+        success: true,
+        message: 'resolve ข้อพิพาทสำเร็จ',
+        deal: updated.rows[0],
+        ledger: { buyerRefund, sellerRelease },
+      });
+
+    } catch (err) {
+      await client.query('ROLLBACK');
+      client.release();
+      throw err; // ส่งต่อไปให้ catch ด้านนอกจัดการ
+    }
   } catch (err) {
     console.error('Resolve Dispute Error:', err);
-    res.status(500).json({
-      error: 'เกิดข้อผิดพลาดในการ resolve',
+    const isConflict = err.message === 'CONFLICT';
+    res.status(isConflict ? 409 : 500).json({
+      error: isConflict ? 'ไม่สามารถ resolve ได้ สถานะอาจเปลี่ยนไปแล้ว' : 'เกิดข้อผิดพลาดในการ resolve',
       details: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }
-};  
+};
 
 /**
  * POST /api/deals/:dealId/evidence

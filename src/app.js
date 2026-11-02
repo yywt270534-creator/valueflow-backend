@@ -27,7 +27,7 @@ app.use(cors({
   origin: 'http://localhost:3000',
   credentials: true,
 }));
-app.use(express.json({ limit: '10kb' }));
+app.use(express.json({ limit: '50mb' }))
 
 // Rate Limit (เก็บไว้ได้ ไม่มีปัญหา)
 const loginLimiter = rateLimit({

@@ -686,7 +686,7 @@ exports.cancelDeal = async (req, res) => {
 exports.disputeDeal = async (req, res) => {
   const { dealId } = req.params;
   const userId = req.user.id;
-  const { reason, detail } = req.body;
+  const { reason, detail, evidence } = req.body;
 
   if (!reason || reason.trim().length < 3) {
     return res.status(400).json({ error: 'กรุณาระบุเหตุผล' });
@@ -712,6 +712,7 @@ exports.disputeDeal = async (req, res) => {
       });
     }
 
+    // 1. อัปเดตสถานะดีลก่อน
     const updated = await pool.query(
       `UPDATE deals
        SET status = 'DISPUTED',
@@ -729,6 +730,40 @@ exports.disputeDeal = async (req, res) => {
 
     if (updated.rows.length === 0) {
       return res.status(409).json({ error: 'ไม่สามารถเปิดข้อพิพาทได้ สถานะอาจเปลี่ยนไปแล้ว' });
+    }
+
+    // 2. อัปโหลดรูปภาพ (ถ้ามี)
+    if (evidence && Array.isArray(evidence) && evidence.length > 0) {
+      for (const img of evidence) {
+        try {
+          const base64Data = img.dataUrl.split(';base64,').pop();
+          const buffer = Buffer.from(base64Data, 'base64');
+          
+          let ext = 'jpg';
+          if (img.name && img.name.includes('.')) {
+            const parsed = img.name.split('.').pop().toLowerCase();
+            if (['jpg', 'jpeg', 'png', 'webp'].includes(parsed)) ext = parsed;
+          }
+          const contentType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+          const storagePath = `${dealId}/dispute_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+
+          const { error: uploadErr } = await supabase.storage
+            .from(BUCKET)
+            .upload(storagePath, buffer, { contentType, upsert: false });
+
+          if (uploadErr) {
+            console.error('❌ Supabase Upload Error:', uploadErr);
+          } else {
+            await pool.query(
+              `INSERT INTO deal_evidence (deal_id, uploaded_by, phase, file_url, file_name, mime_type, file_size) 
+               VALUES ($1, $2, 'dispute', $3, $4, $5, $6)`,
+              [dealId, userId, storagePath, img.name, contentType, buffer.length]
+            );
+          }
+        } catch (imgErr) {
+          console.error('❌ Image processing error:', imgErr);
+        }
+      }
     }
 
     res.status(200).json({
@@ -815,9 +850,10 @@ exports.resolveDispute = async (req, res) => {
       if (buyerRefund < 0 || sellerRelease < 0) {
         return res.status(400).json({ error: 'จำนวนเงินต้องไม่ติดลบ' });
       }
-      if (buyerRefund + sellerRelease > escrowTotal) {
+      const totalSplit = buyerRefund + sellerRelease;
+      if (Math.abs(totalSplit - escrowTotal) > 0.01) {
         return res.status(400).json({
-          error: `ยอดรวม (${buyerRefund + sellerRelease}) เกิน escrow (${escrowTotal})`,
+          error: `ยอดรวมที่แบ่ง (${totalSplit}) ต้องเท่ากับ escrow (${escrowTotal}) เป๊ะๆ ห้ามขาดหรือเกิน`,
         });
       }
     }

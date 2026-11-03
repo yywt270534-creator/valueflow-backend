@@ -864,7 +864,7 @@ exports.resolveDispute = async (req, res) => {
       await client.query('BEGIN');
 
       const updated = await client.query(
-        `UPDATE deals SET status = 'STEP_5_COMPLETED', escrow_status = 'RELEASED', released_at = NOW(), resolved_at = NOW(), resolved_by = $1, resolution = $2, updated_at = NOW() WHERE deal_id = $3 AND status = 'DISPUTED' RETURNING *`,
+      `UPDATE deals SET status = 'STEP_5_COMPLETED', escrow_status = 'RELEASED', released_at = NOW(), resolved_at = NOW(), resolved_by = $1, resolution = $2, updated_at = NOW() WHERE deal_id = $3 AND status = 'DISPUTED'`,
         [adminId, resolution, dealId]
       );
 

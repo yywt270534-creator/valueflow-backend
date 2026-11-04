@@ -557,7 +557,7 @@ exports.releasePayment = async (req, res) => {
       });
     }
 
-    if (deal.status !== 'RELEASE_PENDING' || deal.escrow_status !== 'RELEASE_PENDING') {
+    if (deal.status !== 'STEP_4_INSPECTION' && deal.status !== 'RELEASE_PENDING') {
       return res.status(400).json({
         error: `ไม่สามารถปล่อยเงินได้ สถานะปัจจุบัน: ${deal.status} / ${deal.escrow_status}`,
       });
@@ -570,8 +570,8 @@ exports.releasePayment = async (req, res) => {
            released_at = NOW(),
            updated_at = NOW()
        WHERE deal_id = $1
-         AND status = 'RELEASE_PENDING'
-         AND escrow_status = 'RELEASE_PENDING'
+           AND status IN ('STEP_4_INSPECTION', 'RELEASE_PENDING')
+           AND escrow_status IN ('HELD', 'RELEASE_PENDING')
        RETURNING *`,
       [dealId]
     );
@@ -928,8 +928,9 @@ exports.uploadEvidence = async (req, res) => {
     }
     const deal = dealResult.rows[0];
 
-    if (deal.seller_id !== userId) {
-      return res.status(403).json({ error: 'เฉพาะผู้ขายเท่านั้นที่อัปโหลดหลักฐานได้' });
+    // อนุญาตทั้งผู้ซื้อ (Buyer) และผู้ขาย (Seller) ให้อัปโหลดหลักฐานได้
+    if (deal.seller_id !== userId && deal.buyer_id !== userId) {
+      return res.status(403).json({ error: 'คุณไม่มีสิทธิ์อัปโหลดหลักฐานในดีลนี้' });
     }
 
     const countResult = await pool.query(
@@ -1065,5 +1066,36 @@ exports.hideDeal = async (req, res) => {
       error: 'เกิดข้อผิดพลาด',
       details: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
+  }
+};
+
+exports.editDeal = async (req, res) => {
+  const { dealId } = req.params;
+  const userId = req.user.id;
+  const { title, amount, note, senderAddress, shippingMethod } = req.body;
+
+  try {
+    const dealResult = await pool.query('SELECT * FROM deals WHERE deal_id = $1', [dealId]);
+    if (dealResult.rows.length === 0) return res.status(404).json({ error: 'ไม่พบดีล' });
+    const deal = dealResult.rows[0];
+
+    if (deal.seller_id !== userId) {
+      return res.status(403).json({ error: 'เฉพาะผู้ขายที่สามารถแก้ไขดีลได้' });
+    }
+
+    const updated = await pool.query(
+      `UPDATE deals 
+       SET product_name = $1, price = $2, description = $3, sender_address = $4, 
+           shipping = COALESCE(shipping, '{}'::jsonb) || jsonb_build_object('method', $5::text), 
+           edit_count = COALESCE(edit_count, 0) + 1,
+           updated_at = NOW() 
+       WHERE deal_id = $6 RETURNING *`,
+      [title, amount, note, senderAddress, shippingMethod, dealId]
+    );
+
+    res.status(200).json({ success: true, message: 'แก้ไขสำเร็จ', deal: updated.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'เซิร์ฟเวอร์ผิดพลาด' });
   }
 };

@@ -1099,3 +1099,38 @@ exports.editDeal = async (req, res) => {
     res.status(500).json({ error: 'เซิร์ฟเวอร์ผิดพลาด' });
   }
 };
+
+exports.confirmDeal = async (req, res) => {
+  const { dealId } = req.params;
+  const userId = req.user.id;
+
+  try {
+    const dealResult = await pool.query('SELECT * FROM deals WHERE deal_id = $1', [dealId]);
+    if (dealResult.rows.length === 0) return res.status(404).json({ error: 'ไม่พบดีล' });
+    const deal = dealResult.rows[0];
+
+    if (deal.seller_id === userId) {
+      await pool.query('UPDATE deals SET seller_confirmed = TRUE WHERE deal_id = $1', [dealId]);
+    } else if (deal.buyer_id === userId) {
+      await pool.query('UPDATE deals SET buyer_confirmed = TRUE WHERE deal_id = $1', [dealId]);
+    } else {
+      return res.status(403).json({ error: 'คุณไม่มีสิทธิ์ในดีลนี้' });
+    }
+
+    const updatedResult = await pool.query('SELECT * FROM deals WHERE deal_id = $1', [dealId]);
+    const updatedDeal = updatedResult.rows[0];
+
+    if (updatedDeal.seller_confirmed && updatedDeal.buyer_confirmed) {
+      const finalResult = await pool.query(
+        "UPDATE deals SET status = 'STEP_2_PAYMENT' WHERE deal_id = $1 RETURNING *", 
+        [dealId]
+      );
+      updatedDeal = finalResult.rows[0]; // ต้องมั่นใจว่า declared ด้วย let
+    }
+
+    res.status(200).json({ success: true, deal: updatedDeal });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'เซิร์ฟเวอร์ผิดพลาด' });
+  }
+};

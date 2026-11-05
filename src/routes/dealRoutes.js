@@ -11,7 +11,7 @@ const {
   getMyDeals,
   cancelDeal,
   disputeDeal,
-  uploadEvidence, getEvidence, hideDeal, editDeal
+  uploadEvidence, getEvidence, hideDeal, editDeal, confirmDeal
 } = require('../controllers/dealController');
 const { sendMessage, getMessages } = require('../controllers/chatController');
 const authMiddleware = require('../middleware/authMiddleware');
@@ -30,9 +30,10 @@ router.post('/:dealId/release', releasePayment);  // 👈 เพิ่ม
 router.post('/:dealId/cancel', cancelDeal);
 router.patch('/:dealId/hide', hideDeal);
 router.put('/:dealId', editDeal);
+router.post('/:dealId/confirm', confirmDeal);
 router.post('/:dealId/dispute', disputeDeal);
 router.post('/:dealId/evidence', upload.single('file'), uploadEvidence);
 router.get('/:dealId/evidence', getEvidence);
-router.post('/:dealId/messages', sendMessage);
+router.post('/:dealId/messages', upload.single('file'), sendMessage);
 router.get('/:dealId/messages', getMessages);
 module.exports = router;

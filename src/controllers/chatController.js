@@ -1,4 +1,5 @@
 const pool = require('../config/db');
+const { supabase, BUCKET } = require('../supabase');
 
 // POST /api/deals/:dealId/messages
 exports.sendMessage = async (req, res) => {
@@ -6,8 +7,9 @@ exports.sendMessage = async (req, res) => {
   const userId = req.user.id;
   const { message } = req.body;
 
-  if (!message || message.trim().length === 0) {
-    return res.status(400).json({ error: 'กรุณาพิมพ์ข้อความ' });
+  const file = req.file;
+  if ((!message || message.trim().length === 0) && !file) {
+    return res.status(400).json({ error: 'กรุณาพิมพ์ข้อความหรือแนบไฟล์' });
   }
 
   try {
@@ -23,12 +25,32 @@ exports.sendMessage = async (req, res) => {
     }
 
     // 2. Insert message
-    const result = await pool.query(
-      `INSERT INTO deal_messages (deal_id, sender_id, message, type)
-       VALUES ($1, $2, $3, 'text')
-       RETURNING *`,
-      [dealId, userId, message.trim()]
-    );
+  let msgType = 'text'
+  let finalMsg = message ? message.trim() : ''
+
+  if (file) {
+    const ext = file.originalname.split('.').pop().toLowerCase()
+    const storagePath = `chat/${dealId}/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`
+    
+    const { error: uploadErr } = await supabase.storage
+      .from(BUCKET)
+      .upload(storagePath, file.buffer, { contentType: file.mimetype, upsert: false })
+
+    if (uploadErr) {
+      console.error('Supabase Upload Error:', uploadErr)
+      return res.status(500).json({ error: 'อัปโหลดไฟล์ไม่สำเร็จ', details: uploadErr.message })
+    }
+
+    finalMsg = storagePath
+    msgType = file.mimetype.startsWith('video/') ? 'video' : 'image'
+  }
+
+  const result = await pool.query(
+    `INSERT INTO deal_messages (deal_id, sender_id, message, type)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    [dealId, userId, finalMsg, msgType]
+  );
 
     res.status(201).json({
       success: true,
@@ -71,7 +93,19 @@ exports.getMessages = async (req, res) => {
       [dealId]
     );
 
-    res.json({ success: true, count: result.rows.length, messages: result.rows });
+      const messagesWithUrls = await Promise.all(
+    result.rows.map(async (msg) => {
+      if (msg.type === 'image' || msg.type === 'video') {
+        const { data } = await supabase.storage
+          .from(BUCKET)
+          .createSignedUrl(msg.message, 3600)
+        return { ...msg, signed_url: data?.signedUrl || null }
+      }
+      return { ...msg, signed_url: null }
+    })
+  )
+
+  res.json({ success: true, count: messagesWithUrls.length, messages: messagesWithUrls });
   } catch (err) {
     console.error('Get Messages Error:', err);
     res.status(500).json({
